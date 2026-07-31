@@ -2,7 +2,7 @@ services:
   - type: web
     name: ombre-brain
     env: python
-    region: oregon
+    region: singapore
     # Persistent disks require a paid service.  Starter is the minimum Render
     # plan supported by this Blueprint (512 MiB RAM).
     plan: starter
