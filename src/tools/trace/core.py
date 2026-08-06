@@ -12,7 +12,8 @@ trace 是 OB 唯一的「写元数据」入口，承接所有桶字段更新和�
   必须同时提供非空 delete_reason，普通记忆和 plan 均拒绝且保持原位
 - 收集传入字段构造 updates dict（含 status/weight/dont_surface/
   why_remembered/pinned/digested/resolved/content/tags/domain 等）
-- pinned=1 时强制 importance=10 并做配额检查；pinned=0 仅取消标记
+- pinned=1 时强制 importance=10 并做配额检查；pinned=0 必须在
+  同一次调用显式传入 importance=1..10，原子恢复动态评分
 - content 改写时同步重建 embedding，并对 plan 桶追加 change_log
 - resolved/digested 切换会附中文语义提示
 
@@ -289,6 +290,12 @@ async def trace_core(
     current_pinned = parse_bool(meta.get("pinned"), default=False)
     protected = parse_bool(meta.get("protected"), default=False)
     unpinning_now = pinned == 0 and current_pinned
+    if unpinning_now and not (1 <= importance <= 10):
+        return (
+            f"解除记忆桶 {bucket_id} 的 pinned 状态时，必须在同一次 trace "
+            "中显式传入 importance=1..10。本次未修改。"
+        )
+
     if (
         1 <= importance <= 10
         and (current_pinned or protected)
@@ -296,7 +303,8 @@ async def trace_core(
     ):
         return (
             f"记忆桶 {bucket_id} 是 pinned/protected 核心桶，importance 被锁定为 10，"
-            "本次未修改。请先 trace(bucket_id, pinned=0)，再单独 trace(bucket_id, importance=...)。"
+            "本次未修改。解除 pinned 时请在同一次调用传入 "
+            "trace(bucket_id, pinned=0, importance=1..10)。"
         )
 
     # 配额判定 + 落盘必须在同一把锁里：check_pinned_quota/enforce_high_importance_quota
@@ -483,6 +491,7 @@ async def trace_core(
                 old_str=old_str,
                 new_str=new_str,
                 append_plan_history=append_plan_history_in_patch,
+                event_actor="llm",
                 **updates,
             )
             if not patch_result.get("ok"):
@@ -507,7 +516,11 @@ async def trace_core(
                     return "old_str 与 new_str 替换后正文没有变化；本次未修改。"
                 return f"修改失败: {bucket_id}"
         else:
-            success = await rt.bucket_mgr.update(bucket_id, **updates)
+            success = await rt.bucket_mgr.update(
+                bucket_id,
+                event_actor="llm",
+                **updates,
+            )
             if not success:
                 return f"修改失败: {bucket_id}"
 

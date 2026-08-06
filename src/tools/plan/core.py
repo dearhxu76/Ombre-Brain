@@ -103,6 +103,7 @@ async def plan_create(
         why_remembered=why_remembered,
         weight=weight,
         source_tool="plan",
+        event_actor="llm",
     )
     from .._common import append_plan_change_log
     initial_log = append_plan_change_log([], "created", to=status)
@@ -182,6 +183,7 @@ async def letter_write(
         name=(title.strip()[:60] or f"{a}_{date.strip() or 'letter'}"),
         bucket_type="letter",
         source_tool="letter",
+        event_actor="llm",
     )
     try:
         await rt.bucket_mgr.update(bucket_id, **extra_meta)

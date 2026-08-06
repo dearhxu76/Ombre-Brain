@@ -323,6 +323,7 @@ async def test_legacy_sse_official_client_lists_all_tools():
             recording_app,
             log_level="warning",
             lifespan="on",
+            timeout_graceful_shutdown=1,
         )
     )
     server_task = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))

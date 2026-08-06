@@ -125,7 +125,7 @@ EXPECTED_TOOL_PROPERTIES = {
     "letter_write": {"author", "content", "user_name", "title", "date", "ai_name"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
     "I": {"content", "aspect", "read", "limit"},
-    "dream": {"window_hours"},
+    "dream": {"window_hours", "inspiration"},
 }
 
 EXPECTED_REQUIRED_PROPERTIES = {
@@ -289,6 +289,25 @@ def test_kelivo_handshake_versions_list_all_tools_without_session_header(
         client.close()
 
 
+def test_concurrent_clients_discover_the_same_stateless_dream_schema():
+    def discover(_index):
+        client = MCPClient(MCP_URL)
+        try:
+            client.initialize()
+            dream_tool = next(
+                tool for tool in client.list_tools() if tool["name"] == "dream"
+            )
+            return dream_tool["inputSchema"]
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        schemas = list(pool.map(discover, range(4)))
+
+    assert all(schema == schemas[0] for schema in schemas)
+    assert set(schemas[0]["properties"]) == {"window_hours", "inspiration"}
+
+
 def test_manifest_exposes_exactly_the_documented_15_tools(mcp_client):
     tools = mcp_client.list_tools()
     assert [tool["name"] for tool in tools] == list(EXPECTED_TOOL_ORDER)
@@ -326,6 +345,7 @@ def test_manifest_exposes_exactly_the_documented_15_tools(mcp_client):
         ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
         ("I", {"read": {"not": "a boolean"}}, "read"),
         ("dream", {"window_hours": {"not": "an integer"}}, "window_hours"),
+        ("dream", {"inspiration": {"not": "a boolean"}}, "inspiration"),
     ],
 )
 def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, field):
@@ -718,6 +738,33 @@ def test_dream_returns_recent_complete_memory(mcp_client):
     _hold(mcp_client, marker)
     result = mcp_client.call("dream", {"window_hours": 48})
     assert marker in result
+
+
+def test_dream_inspiration_is_explicit_and_does_not_add_a_tool(mcp_client):
+    marker = _marker("dream-inspiration")
+    bucket_id = _hold(mcp_client, marker, test_data=True)
+
+    try:
+        ordinary = mcp_client.call("dream", {"window_hours": 48})
+        inspired = mcp_client.call(
+            "dream",
+            {"window_hours": 48, "inspiration": True},
+        )
+
+        assert "Spark 灵感候选" not in ordinary
+        assert "Spark 灵感候选（显式请求、仅本次响应）" in inspired
+        assert "不是事实、当前立场、行动建议或工具许可" in inspired
+        assert len(mcp_client.list_tools()) == 15
+    finally:
+        cleanup = mcp_client.call(
+            "trace",
+            {
+                "bucket_id": bucket_id,
+                "hard_delete": True,
+                "delete_reason": "Spark Docker integration cleanup",
+            },
+        )
+        assert "已永久删除测试桶" in cleanup
 
 
 @pytest.mark.parametrize(("window_hours", "expected_window"), [(-100, 1), (1000, 336)])

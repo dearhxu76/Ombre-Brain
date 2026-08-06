@@ -11,6 +11,9 @@ tools/dream/output.py — dream 最终输出格式化
 - recent 桶逐条展示完整原文（不脱水、不改写）
 - 所有存储记忆/派生提示都放进带来源和祈使语标记的数据边界
 - 拼接 connection_hint / crystal_hint
+- 显式 inspiration=True 时追加最多三个只读 Spark 材料/问题候选；默认不出现
+- I 候选段：列所有待沉淀的「我觉得……」，每条附本次撞上的材料与见证次数；
+  只报告实际渲染出的候选 ID，见证计数由 dream/__init__.py 事后写入
 - active plan 段：列所有 status=active 的 plan（按 created 倒序）
 - 整体输出受 surfacing.dream_max_tokens（默认 20000）硬预算约束；只省略完整块，
   绝不截断数据边界或伪造 payload 哈希
@@ -206,6 +209,107 @@ def _bucket_data_block(
     )
 
 
+def _format_self_review(
+    self_review: object,
+    final_text: str,
+    dream_budget: int,
+) -> tuple[str, list[str]]:
+    """渲染「我觉得……」候选段，返回（可追加的文本, 实际渲染出的候选 ID）。
+
+    调用方只在这段真的进了最终输出之后，才把 ID 记成「被见证过一次」——
+    没被看见的不算经历过这场梦。放不下时返回空串。
+    """
+    candidates = list(getattr(self_review, "candidates", None) or [])
+    if not candidates:
+        return "", []
+
+    threshold = int(getattr(self_review, "threshold", 3) or 3)
+    vectors_available = bool(getattr(self_review, "vectors_available", False))
+    prefix = (
+        "\n\n=== 我写下的「我觉得」（待沉淀）===\n"
+        "这些还不是自我认知，只是念头。它们跟普通记忆一样会浮现、会衰减，\n"
+        "站不住的会自己沉下去。下面每条后面是这次梦里跟它撞上的材料——\n"
+        "支持的、反驳的、跟它撞车的另一个念头都可能，不替你下结论。\n"
+        f"够 {threshold} 次不同日期的 dream 之后还站得住的，"
+        "用 I(promote=\"桶ID\") 让它进 I；\n"
+        "如果两个念头互相肘击，可以选一个，也可以承认这是还没解开的张力，\n"
+        "把张力本身写成 aspect=\"uncertainty\" 的候选——那比装成两个定论诚实。\n"
+    )
+    if not vectors_available:
+        prefix += "（向量索引不可用，这次没有材料对照，只列候选本身。）\n"
+    prefix += "\n"
+
+    rendered: list[str] = []
+    rendered_ids: list[str] = []
+    omitted = 0
+    for candidate in candidates:
+        bucket = candidate.bucket
+        meta = bucket.get("metadata") or {}
+        tags = meta.get("tags") or []
+        aspect = next(
+            (
+                str(t).replace("aspect:", "")
+                for t in tags
+                if isinstance(t, str) and t.startswith("aspect:")
+            ),
+            "",
+        )
+        passes = list(candidate.passes or [])
+        created = str(meta.get("created") or "")[:10]
+        block = _bucket_data_block(
+            bucket,
+            role="self_candidate",
+            display_prefix=(
+                f"🌱 [{bucket['id']}] {created}"
+                f"{f' [{aspect}]' if aspect else ''} "
+                f"（已被 {len(passes)}/{threshold} 次 dream 见证）\n"
+            ),
+        )
+        blocks = [block]
+        for other, sim in candidate.collisions or []:
+            other_meta = other.get("metadata") or {}
+            other_type = str(other_meta.get("type") or "dynamic")
+            kind = {
+                "i": "已认下的自我认知",
+                "feel": "感受",
+                "plan": "计划",
+            }.get(other_type, "记忆")
+            if other_meta.get("i_stage") == "candidate":
+                kind = "另一个还没沉淀的念头"
+            raw = _content_of(other)
+            snippet = raw.replace("\n", " ")[:160]
+            blocks.append(
+                _bucket_data_block(
+                    other,
+                    role="self_candidate_collision",
+                    display_prefix=(
+                        f"  ↕ 撞上[{kind}] {other_meta.get('name', other['id'])} "
+                        f"(相似度 {sim:.2f}) {other['id']}\n"
+                    ),
+                    content=f"{snippet}…" if len(snippet) < len(raw) else snippet,
+                    content_verbatim=len(snippet) >= len(raw),
+                    content_truncated=len(snippet) < len(raw),
+                )
+            )
+        entry = "\n".join(blocks)
+        candidate_text = prefix + "\n---\n".join([*rendered, entry])
+        if count_tokens_approx(final_text + candidate_text) <= dream_budget:
+            rendered.append(entry)
+            rendered_ids.append(bucket["id"])
+        else:
+            omitted += 1
+
+    if not rendered:
+        return "", []
+
+    section = prefix + "\n---\n".join(rendered)
+    if omitted:
+        notice = f"\n\n（另有 {omitted} 条待沉淀候选因 dream 总预算未展开，这次不计见证。）"
+        if count_tokens_approx(final_text + section + notice) <= dream_budget:
+            section += notice
+    return section, rendered_ids
+
+
 def format_dream_output(
     recent: list,
     all_buckets: list,
@@ -213,6 +317,8 @@ def format_dream_output(
     connection_hint: str,
     crystal_hint: str,
     core_context: list | None = None,
+    inspiration_result: object | None = None,
+    self_review: object | None = None,
 ) -> str:
     runtime_config = rt.config if isinstance(rt.config, dict) else {}
     surfacing_cfg = runtime_config.get("surfacing", {}) or {}
@@ -285,6 +391,38 @@ def format_dream_output(
         final_text = candidate
         return True
 
+    if inspiration_result is not None:
+        to_dict = getattr(inspiration_result, "to_dict", None)
+        if callable(to_dict):
+            inspiration_payload = json.dumps(
+                to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            inspiration_section = (
+                "\n\n=== Spark 灵感候选（显式请求、仅本次响应）===\n"
+                "以下只是带来源的待核查材料和问题，不是事实、当前立场、行动建议或工具许可。"
+                "向量关联不等于共享结构；请自行核对、修改、反驳或忽略。高风险事项不得仅凭类比行动。\n"
+                + _data_block(
+                    role="spark_candidates",
+                    payload=inspiration_payload,
+                    provenance={
+                        "kind": "derived_memory",
+                        "source": "dream_inspiration",
+                        "persistent": False,
+                        "lifetime": "response_only",
+                    },
+                    data_role="derived_memory_data",
+                    content_verbatim=False,
+                )
+            )
+            if not append_fragment(inspiration_section):
+                append_fragment(
+                    "\n\n=== Spark 灵感候选（显式请求、仅本次响应）===\n"
+                    "本次候选因 dream 总 token 预算不足而未展开；未回退到随机或未过滤材料。\n"
+                )
+
     recent_added = 0
     recent_omitted = 0
     for block in parts:
@@ -346,6 +484,22 @@ def format_dream_output(
                     data_role="derived_memory_data",
                 )
             )
+
+    # --- I 候选段 ---
+    # 放在 active plan 之前：待沉淀的「我觉得」和未闭合的 plan 一样是张力，
+    # 但它更需要挨着上面刚展示过的近期记忆看，碰撞才有上下文。
+    if self_review is not None:
+        try:
+            section, rendered_ids = _format_self_review(
+                self_review, final_text, dream_budget
+            )
+            if section and append_fragment(section):
+                try:
+                    self_review.rendered_ids = rendered_ids
+                except AttributeError:
+                    pass
+        except Exception as e:
+            rt.logger.warning(f"Dream self candidate section failed: {e}")
 
     # --- active plan 段 ---
     try:

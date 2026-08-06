@@ -45,8 +45,9 @@ class MutableBucketManager:
     async def get(self, bucket_id):
         return self.row if bucket_id == self.row["id"] else None
 
-    async def update(self, bucket_id, **updates):
+    async def update(self, bucket_id, *, event_actor="system", **updates):
         assert bucket_id == self.row["id"]
+        assert event_actor == "human"
         if self.on_update is not None:
             self.on_update(updates)
         self.updates.append(dict(updates))

@@ -4972,7 +4972,23 @@ async function showDetail(id) {
 
 async function bucketPin(id) {
   try {
-    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/pin', { method: 'POST' });
+    var current = (allBuckets || []).find(function(b) { return b.id === id; });
+    var body = {};
+    if (current && current.pinned) {
+      var rawImportance = prompt('解除钉选后，请设定新的 importance（1-10）：', '5');
+      if (rawImportance === null) return;
+      var nextImportance = Number(rawImportance);
+      if (!Number.isInteger(nextImportance) || nextImportance < 1 || nextImportance > 10) {
+        alert('importance 必须是 1-10 的整数。');
+        return;
+      }
+      body.importance = nextImportance;
+    }
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/pin', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
     if (!res.ok) throw new Error(await res.text());
     await showDetail(id);
     await loadBuckets();
@@ -7984,7 +8000,7 @@ function renderImportPreflight(data) {
     + ' · 分块：<b>' + (data.chunks_count || 0) + '</b>'
     + ' · 预计 API 调用：<b>' + (data.estimated_api_calls || 0) + '</b>'
     + ' · 大小：<b>' + Math.round((data.size_bytes || 0) / 1024) + ' KB</b>'
-    + (!data.llm_ready ? '<br><span style="color:var(--negative)">压缩/打标 LLM 未就绪，暂不能导入。</span>' : '')
+    + (data.requires_llm !== false && !data.llm_ready ? '<br><span style="color:var(--negative)">压缩/打标 LLM 未就绪，暂不能导入。</span>' : '')
     + (data.import_running ? '<br><span style="color:var(--negative)">已有导入任务运行中，请完成后再开始。</span>' : '');
   const warnings = data.warnings || [];
   if (warn) {

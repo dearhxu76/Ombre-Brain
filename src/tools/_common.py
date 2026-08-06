@@ -826,7 +826,13 @@ async def _merge_or_create_inner(
                         metadata = {}
                     if parse_bool(metadata.get("pinned"), default=False) or parse_bool(
                         metadata.get("protected"), default=False
-                    ) or is_terminal_memory_metadata(metadata):
+                    ) or is_terminal_memory_metadata(metadata) or str(
+                        metadata.get("i_stage") or ""
+                    ) == "candidate":
+                        # 待沉淀的 I 候选不能当合并目标：它是「我对我自己的一个判断」，
+                        # 不是时间里发生的事，把一件事追加进去语义上就错了；而且沉淀
+                        # 要问的是「几轮梦之后它还站得住吗」，正文被改写就没有对象了。
+                        # i_stage 的真源在 tools/i（这里不反向导入，避免循环依赖）。
                         break
                     snapshot_content = str(bucket.get("content") or "")
                     snapshot_metadata = deepcopy(metadata)
@@ -1039,6 +1045,7 @@ async def _merge_or_create_inner(
             title=title,
             why_remembered=why_remembered,
             source_tool=source_tool,
+            event_actor="llm",
             grow_batch_id=grow_batch_id,
             meaning=meaning,
             media=media,

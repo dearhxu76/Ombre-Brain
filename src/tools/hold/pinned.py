@@ -80,6 +80,7 @@ async def store_pinned(
             pinned=True,
             why_remembered=why_remembered,
             source_tool="hold",
+            event_actor="llm",
             allow_embedding_fallback=True,
             meaning=meaning,
             media=media,

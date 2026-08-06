@@ -147,6 +147,7 @@ def register(mcp) -> None:
                 name=(title[:60] or f"{author}_{date or 'letter'}"),
                 bucket_type="letter",
                 source_tool="letter",
+                event_actor="human",
             )
             await sh.bucket_mgr.update(bid, **extra)
             return JSONResponse({"ok": True, "id": bid})

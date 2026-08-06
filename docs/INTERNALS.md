@@ -147,7 +147,7 @@ src/tools/
 ├── trace/         # core（metadata/resolved/pinned/delete/content 替换/计划状态等全在这）
 ├── anchor/        # core：anchor_set / anchor_release / pulse
 ├── plan/          # core：plan_create / letter_write / letter_read
-└── i/             # core：自我认知条目读写（dispatch=i_core），iter 2.x 新增
+└── i/             # core：自我认知的候选写入 / 升级 / 读取 + 见证计数（dispatch=i_core）
 ```
 
 路线：`server.X(...)` → `tools.X.dispatch(...)`（`__init__.py`）→ 分支函数。所有分支只通过 `from .. import _runtime as rt` 读依赖，不能 `import server`。`server.py` 保留了 `_check_content_size / _check_pinned_quota / _max_bucket_bytes / _max_pinned / _merge_or_create / _check_duplicate_for / _check_plan_resolution` 这几个别名，让仍引用它们的调用点不需要改。
@@ -358,16 +358,30 @@ feel 桶自身：
 
 ### 3.6 `dream` — 做梦自省
 
-签名：`dream(window_hours=48)`（默认 48h 窗口；clamp 到 1~336h）
+签名：`dream(window_hours=48, inspiration=False)`（默认 48h 窗口；clamp 到 1~336h）
 
 - 默认取过去 48 小时内 `created` 或 `last_active` 任一在窗口内的桶（排除 permanent/feel/pinned/protected/plan/letter，以及 digested/dont_surface/anchor）
 - 排序：先按 `last_active` 倒序；候选超过 **40 个**时改按 `decay_engine.calculate_score()` 降序截断到前 40，避免一次涌进来太多撑爆上下文
 - 拼接桶摘要（完整正文，不截断）+ 自省引导 header
 - embedding 启用时附加：连接提示（最相似对，`>0.5`）+ feel 结晶提示（一条 feel 与 ≥2 条其它 feel 相似度 `>0.7` → 建议升级为 pinned）
+- 仅当调用方显式传 `inspiration=True` 时，在正文前部追加最多三个响应态 Spark 材料/问题候选：
+  - policy-first 只允许活动、未解决、普通 `dynamic` 桶；排除归档/删除/墓碑、`dont_surface`、
+    `digested`、anchor、pinned/protected/permanent 和私有类型
+  - 只读本地 `embeddings.db` 已有向量，不调用 embedding provider；选择语义近邻、跨域桥接及
+    条件反转核查材料，不包含随机通道
+  - 每条带两个来源 ID、完整正文 SHA-256、精确片段跨度、待核查共享结构、不对应处和假设；
+    向量相似度仅为选择证据，不合成灵感分、真值分或行动分
+  - 候选 `persistent=false`、`lifetime=response_only`、`retrievable=false`，不调用
+    `touch/touch_many`、不写桶、不记账、不进入 webhook payload；当前模型保留判断权
+  - embedding 关闭、向量不足或无合格非随机配对时失败关闭为空说明，不回退到普通 search、
+    随机材料或未过滤池
 - 末尾追加 `=== 你的 active plans ===` 全量列表
 - 末尾追加 `=== 你的 feel 历史（全量，旧 feel 按 token 预算折叠）===`：按 `surfacing.feel_max_tokens`（默认 6000）做预算，超出的老 feel 折叠为 60 字符单行摘要
 
-(实现细节：用户可手动传更大的 `window_hours`，但软上限 40 仍生效。plan 历史不参与 token 预算全量返回；feel 历史走 token 预算折叠。)
+(实现细节：用户可手动传更大的 `window_hours`，但软上限 40 仍生效。`inspiration=False`
+保持原 dream 输出；参数只接受布尔值且不会自动翻转。Spark 候选和其边界也计入
+`surfacing.dream_max_tokens`，预算不足时整段省略而不破坏边界。plan 历史不参与 token
+预算全量返回；feel 历史走 token 预算折叠。)
 
 ### 3.7 `plan` — 登记待办
 
@@ -403,13 +417,21 @@ feel 桶自身：
 
 ### 3.11 `I` — 自我认知条目（iter 2.x）
 
-签名：`I(content="", aspect="", read=False, limit=20)`
+签名：`I(content="", aspect="", read=False, limit=20, promote="")`
 
-实现在 `tools/i/`（`dispatch = i_core`）。语义：「我写下关于我自己的认识」——不是「时间里发生的事」，而是模型对自身本质/规律/变化的观察。
+实现在 `tools/i/`（`dispatch = i_core`）。语义：「我写下关于我自己的认识」——不是「时间里发生的事」，而是模型对自身本质/规律/变化的观察。**`I` 是沉淀物不是日记**：想法先当普通记忆活着，经 dream 反复碰撞后才可能升级进 `I`（哲学边界见 `rule.md` 第 13.1 条）。
 
-- `content` 空 或 `read=True` → **读取模式**，返回已积累的全部自我认知（按 `limit` 截断，默认 20 条）。
-- `content` 非空 → **写入模式**，记一条自我认知；`aspect` 可选维度：`nature`(本质) / `values`(看重的) / `patterns`(规律) / `limits`(局限) / `becoming`(在变成什么) / `uncertainty`(不确定的) / `stance`(立场)。
-- I 条目写入时带 `dont_surface=True`：**不参与普通 `breath` / `dream`**；只在 `SessionStart` 时自动附带最近 3 条。
+- `content` 非空 → **写候选**。创建一条普通 `dynamic` 桶，tag `__i_candidate__`（刻意不是 `__i__`）、`i_stage="candidate"`、`i_dream_dates=[]`。候选照常浮现、衰减、进 dream 窗口——站不住的自然沉下去。`aspect` 可选维度：`nature`(本质) / `values`(看重的) / `patterns`(规律) / `limits`(局限) / `becoming`(在变成什么) / `uncertainty`(不确定的) / `stance`(立场)。
+- `content` 空 或 `read=True` → **读取模式**，返回正式条目（按 `limit` 截断，默认 20 条）＋ 待沉淀候选清单；没有 `i_from_candidate` 的历史条目标注为「早期直接写入，未经沉淀」。
+- `promote="桶ID"` → **升级**。要求该候选的 `i_dream_dates` 已有 ≥ `I_PROMOTE_THRESHOLD`（3）个不同日期，否则拒绝并报告还差几次。通过后创建 `type="i"` 桶（`dont_surface=True`、`i_from_candidate`、继承 `i_dream_dates`），候选桶保留原文并改标 `i_stage="promoted"` / `i_promoted_to` / `resolved=True`。同时传 `content` 可用提炼后的措辞落成正式条目。
+- 正式 I 条目带 `dont_surface=True`：**不参与普通 `breath` / `dream`**；只在 `SessionStart` 时自动附带最近 3 条。
+
+dream 侧配合（`tools/dream/hints.py` + `output.py`）：
+
+- `collect_self_candidates(all_buckets)` 收集全部待沉淀候选，用**已落盘向量**（不发新请求）为每条取相似度 ≥ 0.35 的前 3 条对照材料；对照池 = 全部正式 I 条目 + 全部其它候选 + 最近 200 条普通桶（排除 `letter`）。向量不可用时只列候选并明说。
+- 输出段落排在 recent 段之后、active plan 段之前，受 `surfacing.dream_max_tokens` 预算约束。
+- 见证计数由 `dream/__init__.py` 在渲染成功后调 `tools.i.record_dream_pass()` 写入，按天去重；因预算未展开的候选不计次——没被看见的不算经历过。
+- 碰撞只摆材料，**不做矛盾/重复判定**（认知层边界，`rule.md` 第 5 条）。
 
 ---
 

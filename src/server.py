@@ -822,7 +822,8 @@ async def trace(
     """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
 
     resolved=1 标记已放下；resolved=0 重新激活。pinned=1 标记永久核心并锁定
-    importance=10；pinned=0 取消。digested=1 标记已消化并从默认/被动浮现及 dream 隐藏，
+    importance=10；pinned=0 取消时必须在同一次调用显式传入 importance=1..10。
+    digested=1 标记已消化并从默认/被动浮现及 dream 隐藏，
     但仍可通过显式 query、importance 审计或目录找回。content 会完整替换正文；
     old_str/new_str 会在完整原文中做唯一、逐字的局部替换（new_str 可为空以删除），
     两种方式都会重建 embedding，且不能同时使用。status/weight 用于 plan；dont_surface 控制日常浮现；
@@ -890,15 +891,26 @@ except (AttributeError, RuntimeError, TypeError, ValueError) as _trace_schema_ex
 
 
 @mcp.tool()
-async def dream(window_hours: Optional[int] = 48) -> str:
+async def dream(
+    window_hours: Optional[int] = 48,
+    inspiration: bool = False,
+) -> str:
     """读取最近 window_hours（默认 48h）内有变动的所有记忆桶,用于回顾与消化。
     每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断。
     可据此操作：放下的 → trace(resolved=1) 沉底；有沉淀的 → hold(feel=True, source_bucket=...) 记录；无沉淀则不操作。
-    候选桶超过 40 时按 decay_engine.calculate_score() 排序取前 40，避免一次返回过多。"""
+    候选桶超过 40 时按 decay_engine.calculate_score() 排序取前 40，避免一次返回过多。
+    inspiration=True 时额外返回最多三个只读、带来源、仅本次响应有效的灵感材料/问题候选；
+    默认 False，不会自动触发，不新增 MCP 工具，也不会 touch、写回或让候选取得事实/行动权。"""
     return await _with_notice(
-        _t_dream.dispatch(window_hours=window_hours),
+        _t_dream.dispatch(
+            window_hours=window_hours,
+            inspiration=inspiration,
+        ),
         op="dream",
-        args={"window_hours": window_hours},
+        args={
+            "window_hours": window_hours,
+            "inspiration": inspiration,
+        },
     )
 
 
@@ -1007,12 +1019,18 @@ async def I(
     aspect: Optional[str] = "",
     read: Optional[bool] = False,
     limit: Optional[int] = 20,
+    promote: Optional[str] = "",
 ) -> str:
-    """记录或读取自我认知条目。content=要记录的自我认知内容(空=进入读取模式)。aspect=维度:nature(本质)/values(看重的)/patterns(规律)/limits(局限)/becoming(变化方向)/uncertainty(不确定的)/stance(立场)(可选)。read=True=读取所有已积累条目。limit=返回条数上限(默认 20)。条目不参与普通 breath/dream，SessionStart 时自动附最近 3 条。"""
+    """写下或读取自我认知。I 是沉淀物不是日记：content=一个「我觉得……」，先落成一条普通记忆（候选），会浮现也会衰减，每次 dream 都跟相关记忆摆在一起碰撞。aspect=维度:nature(本质)/values(看重的)/patterns(规律)/limits(局限)/becoming(变化方向)/uncertainty(不确定的)/stance(立场)(可选)。read=True 或全空=读正式条目+待沉淀候选。limit=返回条数上限(默认 20)。promote=候选桶ID，被 3 次不同日期的 dream 见证后才能升级成正式条目（可同时传 content 用提炼后的措辞）。正式条目不参与普通 breath/dream，SessionStart 时自动附最近 3 条。"""
     return await _with_notice(
-        _t_i.dispatch(content=content, aspect=aspect, read=read, limit=limit),
+        _t_i.dispatch(
+            content=content, aspect=aspect, read=read, limit=limit, promote=promote
+        ),
         op="I",
-        args={"content_len": len(content or ""), "aspect": aspect, "read": read, "limit": limit},
+        args={
+            "content_len": len(content or ""), "aspect": aspect, "read": read,
+            "limit": limit, "promote": promote,
+        },
     )
 
 

@@ -95,7 +95,7 @@ async def test_unpin_via_trace_frees_pinned_quota(bucket_mgr):
     assert await enforce_pinned_quota(True) is False
 
     # 复现步骤：trace(bucket_id, pinned=0) 解钉一个
-    await trace_core(ids[0], pinned=0)
+    await trace_core(ids[0], pinned=0, importance=7)
 
     # 计数必须实时下降，且立刻能钉新的——不允许残留旧计数
     assert await count_pinned() == 2
@@ -115,7 +115,7 @@ async def test_trace_unpin_reserves_new_high_importance_slot(
     await bucket_mgr.create(content="existing high slot", importance=9)
     pinned_id = await bucket_mgr.create(content="will be unpinned", pinned=True)
 
-    await trace_core(pinned_id, pinned=0)
+    await trace_core(pinned_id, pinned=0, importance=10)
 
     unpinned = await bucket_mgr.get(pinned_id)
     assert unpinned["metadata"]["pinned"] is False
@@ -140,6 +140,20 @@ async def test_trace_can_unpin_and_lower_importance_atomically(bucket_mgr):
 
 
 @pytest.mark.asyncio
+async def test_trace_rejects_unpin_without_same_call_importance(bucket_mgr):
+    install_runtime(bucket_mgr)
+    pinned_id = await bucket_mgr.create(content="must choose importance", pinned=True)
+
+    result = await trace_core(pinned_id, pinned=0)
+
+    unchanged = await bucket_mgr.get(pinned_id)
+    assert "importance" in result
+    assert unchanged["metadata"]["pinned"] is True
+    assert unchanged["metadata"]["type"] == "permanent"
+    assert unchanged["metadata"]["importance"] == 10
+
+
+@pytest.mark.asyncio
 async def test_permanent_type_does_not_occupy_pinned_quota(bucket_mgr):
     """旧根因锁死：解钉后桶留在 permanent 类型/目录，不得再占 pinned 配额。
 
@@ -151,7 +165,7 @@ async def test_permanent_type_does_not_occupy_pinned_quota(bucket_mgr):
     await bucket_mgr.create(content="真钉 B", pinned=True)
     for i in range(2):
         bid = await bucket_mgr.create(content=f"曾钉 {i}", pinned=True)
-        await trace_core(bid, pinned=0)
+        await trace_core(bid, pinned=0, importance=7)
 
     # 只数 metadata.pinned=True 的：2，不是 4
     assert await count_pinned() == 2

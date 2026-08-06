@@ -68,6 +68,7 @@ async def store_feel(
         why_remembered=why_remembered,
         triggered_by=source_bucket.strip() if source_bucket else "",
         source_tool="hold",
+        event_actor="llm",
         bucket_id_override=_build_feel_id(feel_valence),
         allow_embedding_fallback=True,
         meaning=meaning,

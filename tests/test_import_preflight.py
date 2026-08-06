@@ -68,6 +68,57 @@ def test_preview_import_counts_turns_chunks_and_estimated_calls():
     assert "[阿立]" in preview["first_chunk_preview"]
 
 
+def test_preview_structured_memory_json_requires_no_llm():
+    from import_memory import preview_import
+
+    raw = json.dumps([
+        {
+            "name": "茶",
+            "content": "用户喜欢乌龙茶。",
+            "domain": ["饮食"],
+            "valence": 0.7,
+            "arousal": 0.2,
+            "tags": ["茶"],
+            "importance": 6,
+        },
+        {
+            "name": "计划",
+            "content": "用户计划周末整理书架。",
+            "domain": ["计划"],
+            "valence": 0.5,
+            "arousal": 0.3,
+            "tags": [],
+            "importance": 5,
+        },
+    ], ensure_ascii=False)
+
+    preview = preview_import(raw, filename="memories.json")
+
+    assert preview["ok"] is True
+    assert preview["detected_format"] == "structured_memory_json"
+    assert preview["turns_count"] == 2
+    assert preview["chunks_count"] == 2
+    assert preview["estimated_api_calls"] == 0
+    assert preview["requires_llm"] is False
+
+
+def test_preview_structured_memory_json_reports_exact_invalid_item():
+    from import_memory import preview_import
+
+    raw = json.dumps([
+        {"name": "正常", "content": "可导入", "importance": 6},
+        {"name": "缺正文", "importance": 5},
+    ], ensure_ascii=False)
+
+    preview = preview_import(raw, filename="memories.json")
+
+    assert preview["ok"] is False
+    assert preview["requires_llm"] is False
+    assert preview["estimated_api_calls"] == 0
+    assert "第 2 项" in preview["error"]
+    assert "content" in preview["error"]
+
+
 def test_preview_import_warns_when_invalid_json_falls_back_to_text():
     from import_memory import preview_import
 
@@ -132,6 +183,35 @@ async def test_import_preflight_route_returns_preview_with_runtime_readiness(mon
     assert payload["filename"] == "chat.md"
     assert payload["turns_count"] == 2
     assert payload["chunks_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_preflight_can_start_when_llm_is_unavailable(monkeypatch):
+    class OfflineDehydrator:
+        api_available = False
+
+    class OfflineImportEngine:
+        is_running = False
+        dehydrator = OfflineDehydrator()
+
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda request: None)
+    monkeypatch.setattr(import_api.sh, "import_engine", OfflineImportEngine())
+    monkeypatch.setattr(import_api.sh, "config", {"human": "阿立"})
+    mcp = FakeMCP()
+    import_api.register(mcp)
+    raw = json.dumps([
+        {"name": "来源明确", "content": "人工整理的记忆", "importance": 6}
+    ], ensure_ascii=False)
+
+    response = await mcp.routes[("POST", "/api/import/preflight")](
+        BodyRequest(raw, filename="memories.json")
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["llm_ready"] is False
+    assert payload["requires_llm"] is False
+    assert payload["can_start"] is True
 
 
 @pytest.mark.asyncio

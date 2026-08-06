@@ -241,6 +241,36 @@ def register(mcp) -> None:
                     current_importance = int(meta.get("importance") or 0)
                 except (TypeError, ValueError):
                     current_importance = 0
+                unpin_importance = current_importance
+                if current_pinned and not protected:
+                    try:
+                        body = await sh._read_json_object(request)
+                        raw_importance = body.get("importance")
+                        if isinstance(raw_importance, bool):
+                            raise ValueError("boolean is not an importance")
+                        unpin_importance = int(raw_importance)
+                        if (
+                            isinstance(raw_importance, float)
+                            and not raw_importance.is_integer()
+                        ):
+                            raise ValueError("fractional importance")
+                    except Exception:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    if not 1 <= unpin_importance <= 10:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    update_kwargs["importance"] = unpin_importance
                 current_type = str(
                     meta.get("type") or "dynamic"
                 ).strip().lower()
@@ -260,7 +290,7 @@ def register(mcp) -> None:
                 })
                 after_quota_meta = dict(before_quota_meta)
                 after_quota_meta.update({
-                    "importance": 10 if new_pinned else current_importance,
+                    "importance": 10 if new_pinned else unpin_importance,
                     "pinned": new_pinned,
                     "type": final_type,
                 })
@@ -327,12 +357,16 @@ def register(mcp) -> None:
                     # same BucketManager transaction.
                     if occupies_high_after and not occupied_high_before:
                         adjusted_importance = (
-                            await _enforce_high_importance_quota(current_importance)
+                            await _enforce_high_importance_quota(unpin_importance)
                         )
-                        if adjusted_importance != current_importance:
+                        if adjusted_importance != unpin_importance:
                             update_kwargs["importance"] = adjusted_importance
 
-                ok = await sh.bucket_mgr.update(bucket_id, **update_kwargs)
+                ok = await sh.bucket_mgr.update(
+                    bucket_id,
+                    event_actor="human",
+                    **update_kwargs,
+                )
                 if not ok:
                     latest = await sh.bucket_mgr.get(bucket_id)
                     if _is_terminal_memory_metadata(

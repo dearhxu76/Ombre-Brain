@@ -2,6 +2,94 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.13.1
+
+### 修复 / Fixed
+
+- 修复热更新因完整性清单不符而整包中止：`update_manifest.json` 首次入库时是在
+  Windows 工作区生成的，记录的是 CRLF 字节，而 GitHub 源码归档携带的是仓库里的
+  内容，206 个文件里有 170 个大小/哈希对不上，更新在 `frontend/onboarding.html`
+  处中止（清单记 10819 字节，归档里是 10621）。
+- `deploy/gen_update_manifest.py` 改为直接读 Git 仓库存储字节（优先 index，回退
+  HEAD）生成清单，不再读工作区，也不用「文本一律归一为 LF」的启发式——本仓库
+  index 里有 9 个文件存的就是 CRLF、30 个是混合行尾，归一化会把这 39 个反向算错。
+  文件不在 index 也不在 HEAD 时直接报错，不再拿工作区字节顶替。
+- 发布顺序固定为：先 `git add` 代码改动，再生成清单——清单描述的是仓库内容，
+  不是磁盘内容。
+
+### 测试 / Tests
+
+- 新增 `tests/test_update_manifest_repo_bytes.py`：用临时 git 仓库复现
+  「index 存 LF / 工作区 CRLF」与「index 存 CRLF」两种会被算错的形态，
+  并校验仓库现有清单与 HEAD 字节逐条一致。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.13.1`。
+
+## 2.13.0
+
+### 新增 / Added
+
+- `I` 改成沉淀机制：写下的「我觉得……」不再直接成为自我认知，而是先落成一条普通 `dynamic` 记忆（候选），跟别的记忆一样浮现、衰减、进 dream；站不住的自然沉下去。
+- `dream` 新增待沉淀候选段：列出每条候选、已被几次 dream 见证，并附本次语义上撞上的材料——已认下的自我认知、普通记忆、另一个还没沉淀的念头都可能出现。碰撞只摆材料，不判断谁支持谁、谁与谁矛盾。向量索引不可用时照样列候选，并明说这次没有材料对照。
+- `I(promote="桶ID")` 升级候选为正式条目，门槛是被 **3 个不同日期**的 dream 见证过；不够时明确回报还差几次。可同时传 `content` 用提炼后的措辞落成正式条目。
+- `I(read=True)` 同时列出待沉淀候选，并把早期直接写入的历史条目标注为「未经沉淀」。
+
+### 边界 / Boundaries
+
+- 见证只认真的被渲染进 dream 输出的候选；因 token 预算未展开的候选不计次数。同一天做多次 dream 只算一次见证。
+- 升级不删除候选桶（rule.md 第 1 条），候选保留原文并标记 `i_stage: promoted` 与指向正式条目的 `i_promoted_to`。
+- 候选带 `__i_candidate__` 标签而非 `__i__`，不会被 SessionStart 注入或 Dashboard `/api/self` 当成已成立的自我认知。
+- 待沉淀候选不能被 `hold` / `grow` 当作合并目标（与 pinned / protected 同一道准入）：它是「我对我自己的一个判断」而不是时间里发生的事，正文被追加改写会让「几轮梦之后它还站得住吗」失去判断对象。候选升级或退出候选状态后，合并路径恢复正常。
+- 不提供绕过候选阶段直写正式 `I` 的通道；哲学边界见 rule.md 第 13.1 条。
+
+### 测试 / Tests
+
+- 新增 `tests/test_i_sediment.py`：候选形态、见证计数按天去重、未渲染不计次、门槛拒绝与升级后候选留存、碰撞材料呈现、向量不可用降级、早期条目标注。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.13.0`。
+
+## 2.12.1
+
+### 修复 / Fixed
+
+- 解钉现在必须在同一次 LLM `trace` 或 Dashboard 请求中明确给出 `importance=1..10`，并原子落盘为动态桶；不再让解除核心后的记忆沿用 999 分短路或依赖第二次补写。
+- 新记忆统一声明 `source_tool`，内部 append-only Footprint 记录创建来源以及钉选/解钉操作者（用户、LLM 或系统）；足迹供召回时的 LLM 判断，不新增 Dashboard 编辑入口，也不替代桶与 ledger 真源。
+- 标准记忆 JSON（`name/content/domain/valence/arousal/tags/importance`）改为确定性直导，不再先发 LLM 请求；预检明确显示 0 次 API 调用，逐项校验失败会指出条目与原因，无 LLM 配置时也可导入。
+
+### 测试 / Tests
+
+- 增加 Footprint 来源与操作者、LLM/Dashboard 解钉原子 importance、结构化 JSON 离线直导、无 LLM 预检及逐项错误反馈回归。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.12.1`。
+
+## 2.12.0
+
+### 新增 / Added
+
+- 新增开发侧离线 `HN-F1` 候选工具：以严格枚举元数据执行 PAS10 计数档位归一化，并用纯整数 Pareto-DP 对 PAS12 的 `P0/M1/Rtech` 粗分区给出可复核的精确可行、精确不可行或资源不确定结果。
+- 新增候选机器合同、输入成员集合绑定、实现与 schema 哈希绑定、独立 witness 复核，以及 `aggregate-last.v1` 两文件逻辑提交协议。aggregate 仅在最后发布；缺少 aggregate 或两文件结构、共同字段、场景投影、私有运行记录哈希不一致时，不得把结果视为已提交 receipt。
+
+### 安全与边界 / Security & Boundaries
+
+- 除读取自身实现两次以核对运行前后完整性外，工具的业务输入只来自由外部管理员事前建立并证明 ACL／单写者边界的受限目录中的无正文枚举 JSON；它不读取 OB 配置、环境变量、真实 vault、模型输出或网络资源。代码内的路径与文件模式检查只是事故防护，不证明现实 ACL、owner、不可变性或跨文件事务。源码位于 Docker 构建上下文排除的 `tools/`，不新增 MCP、Dashboard 或线上运行入口。
+- 当前实现只是未冻结的 PAS10 候选归一化器与 PAS12 候选数学核，不计算 PAS01–PAS14 治理状态，不执行 donor 联系、真实数据实验、PAS13 公开投影或 PAS14 授权。正式 PAS 哈希与批准状态不能由候选输出替代。
+- `max_seconds` 是归一化与 LB/UB 共用的协作式单调时钟预算；检查到超时只返回资源错误与数学不确定。它不是硬 wall-clock 隔离，正式运行仍需外部 watchdog、内存/CPU 限制与冻结的恢复规则。
+
+### 测试 / Tests
+
+- 增加计数档位、nonresponse、资格/处置、frame/implementation/schema 绑定、严格 JSON、输出 pair 一致性、CLI 泄漏与受限路径回归。
+- 增加独立 `4^N` 小规格穷举对照、固定 44 人边界、M1 cap、零目标、Pareto 剪枝、早停、witness 篡改与资源上限 fail-closed 回归。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与热更新优先读取的 `src/VERSION` 同步更新为 `2.12.0`。
+
 ## 2.11.1
 
 ### 修复 / Fixed

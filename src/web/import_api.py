@@ -476,13 +476,15 @@ def register(mcp) -> None:
                 )
             raw_content = ""
             llm_ready = _import_llm_ready()
+            requires_llm = bool(preview.get("requires_llm", True))
             return JSONResponse({
                 **preview,
                 "filename": filename,
                 "size_bytes": size_bytes,
                 "import_running": False,
                 "llm_ready": llm_ready,
-                "can_start": bool(preview.get("ok")) and llm_ready,
+                "can_start": bool(preview.get("ok"))
+                and (llm_ready or not requires_llm),
             })
         finally:
             history_ingest_lock.release()
@@ -1155,6 +1157,13 @@ def register(mcp) -> None:
             except ValueError as e:
                 return reject(str(e))
 
+        unpinning_now = current_pinned and not requested_pinned and not protected
+        if unpinning_now and requested_importance is None:
+            return reject(
+                "unpinning requires importance from 1 to 10 in the same edit",
+                field="importance",
+            )
+
         type_changed = requested_type != current_type
         if type_changed:
             if protected and requested_type != "permanent":
@@ -1381,7 +1390,11 @@ def register(mcp) -> None:
                 ):
                     expected_values["type"] = "dynamic"
 
-                ok = await sh.bucket_mgr.update(bucket_id, **updates)
+                ok = await sh.bucket_mgr.update(
+                    bucket_id,
+                    event_actor="human",
+                    **updates,
+                )
                 if not ok:
                     latest = await sh.bucket_mgr.get(bucket_id)
                     if _is_terminal_memory_metadata(
