@@ -27,7 +27,7 @@
 我有十五种能力，全部在一个 MCP 连接器 `/mcp` 里：
 
 - **高频 8 个**：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `dream` / `trace`
-- **低频 7 个**：`anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`
+- **低频 8 个**：`anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`
 
 连上 `/mcp` 就拥有全部十五种能力。
 
@@ -159,15 +159,20 @@ hook、后台任务或低检索命中自动开启。开启后最多追加三个�
 
 `release` 只是从 anchor 状态退出，pinned/importance 不变，桶恢复正常浮现资格。
 
-#### `letter_write(author, content, ...)` / `letter_read(...)` — 我写信、读信
+#### `letter_write(...)` / `letter_read(...)` / `letter_lock_update(...)` — 我写信、读信、管理锁
 
 - `letter_write(author="claude", content="...", title="...")` — 我写给她他。
 - `letter_write(author="user", content="...", user_name="...")` — 把她他写给我的留下。
 - `author="user"` 表示用户侧，`author="ai"`（或与 `ai_name` 相同）表示 AI 侧；也可以直接传任意自定义署名字符串，读取时可用同一署名过滤。
 - `letter_read()` — 按时间倒序读最近 10 封。
 - `letter_read(query="那次离开后", author="claude")` — 语义检索 + 方向过滤。
+- `letter_write(..., lock_type="timed", unlock_date="2026-08-12T20:00:00+08:00")` — 写一封定时锁信；必须使用未来且带时区的时间。
+- `letter_write(..., lock_type="permanent")` — 写一封无自动解锁时间的锁信。
+- `letter_lock_update(letter_id="...", lock_type="none")` — 锁拥有者提前解锁；也可在 `timed` / `permanent` 间切换。
 
-**信件原文永久保留，不压缩、不合并、不衰减**。普通 breath 不会浮信件，但 `/breath-hook`（SessionStart）会自动把双方各最新一封带给我。
+带锁 Letter 必须由当前可信入口所属的一方亲自录入；`author` 只是署名，不能改变锁所有权。锁住时，对方的读取、SessionStart 和语义搜索都不会得到标题、正文、摘要或命中片段；锁拥有者仍可正常读取和搜索。**信件原文永久保留，不压缩、不合并、不衰减**。
+
+时间锁不是加密：能直接访问 vault Markdown 或宿主机文件的人仍能读取原文。
 
 #### `I(content, aspect, read, limit)` — 我认识我自己
 

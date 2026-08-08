@@ -301,7 +301,7 @@ def test_shadow_remains_outside_product_mcp_and_docker_surfaces_after_product_op
     assert "spark_shadow" not in dockerfile
     assert "spark_shadow" not in server
     assert "spark_shadow" not in public_tools
-    assert len(re.findall(r"(?m)^@mcp\.tool\(\)", server)) == 15
+    assert len(re.findall(r"(?m)^@mcp\.tool\(\)", server)) == 16
     server_tree = ast.parse(server, filename=str(ROOT / "src" / "server.py"))
     dream_functions = [
         node

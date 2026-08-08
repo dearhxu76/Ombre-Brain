@@ -314,7 +314,7 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 # host="0.0.0.0" so Docker container's SSE is externally reachable
 # stdio mode ignores host (no network)
 #
-# iter 2.2 后对外只有单连接器 /mcp。当前 15 个工具全部直接注册到
+# iter 2.2 后对外只有单连接器 /mcp。当前 16 个工具全部直接注册到
 # 这一实例，不再依赖 FastMCP 私有注册表的启动期合并，导入式 ASGI 启动也能
 # 稳定暴露完整工具清单。
 #
@@ -975,18 +975,45 @@ async def letter_write(
     title: Optional[str] = "",
     date: Optional[str] = "",
     ai_name: Optional[str] = "",
+    lock_type: Optional[str] = "none",
+    unlock_date: Optional[str] = "",
 ) -> str:
     """写入一封信。author 必填:\"user\"=用户一方写的,\"ai\"(或等于 ai_name)=AI 一方写的,也可直接传任意署名字符串;user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");title/date 可选。信件原文永久保存,不压缩/不合并/不衰减,仅建向量索引;普通 breath 不返回,SessionStart 钩子会带上双方各最新一封。"""
     return await _with_notice(
         _t_plan.letter_write(
             author=author, content=content, user_name=user_name,
             title=title, date=date, ai_name=ai_name,
+            lock_type=lock_type, unlock_date=unlock_date,
         ),
         op="letter_write",
         args={
             "author": author, "content_len": len(content or ""),
             "user_name": user_name, "title": title, "date": date,
-            "ai_name": ai_name,
+            "ai_name": ai_name, "lock_type": lock_type,
+            "unlock_date": unlock_date,
+        },
+    )
+
+
+@mcp.tool()
+async def letter_lock_update(
+    letter_id: str,
+    lock_type: str,
+    unlock_date: Optional[str] = "",
+) -> str:
+    """只修改既有 Letter 的锁元数据。仅锁拥有者可操作；不编辑标题、正文、署名或创建时间。"""
+    return await _with_notice(
+        _t_plan.letter_lock_update(
+            letter_id=letter_id,
+            lock_type=lock_type,
+            unlock_date=unlock_date,
+            caller_side="ai",
+        ),
+        op="letter_lock_update",
+        args={
+            "letter_id": letter_id,
+            "lock_type": lock_type,
+            "unlock_date": unlock_date,
         },
     )
 
@@ -1060,6 +1087,7 @@ for _strict_tool_name in (
     "pulse",
     "plan",
     "letter_write",
+    "letter_lock_update",
     "letter_read",
     "I",
 ):
@@ -1170,7 +1198,7 @@ if __name__ == "__main__":
             static_token_validator=_mcp_static_token_validator,
         )
         if transport == "streamable-http":
-            logger.info("MCP 单连接器 /mcp：15 个工具统一对外暴露")
+            logger.info("MCP 单连接器 /mcp：16 个工具统一对外暴露")
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
             "MCP request body limit: %s",
@@ -1256,5 +1284,5 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     else:
-        # stdio：15 个工具已直接注册在唯一 mcp 实例上，这里直接运行即可。
+        # stdio：16 个工具已直接注册在唯一 mcp 实例上，这里直接运行即可。
         mcp.run(transport=transport)

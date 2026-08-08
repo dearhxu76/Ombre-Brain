@@ -21,6 +21,7 @@ def test_public_tool_contract_accepts_normal_organ_tools(tool_name):
         ("release", "anchor"),
         ("letter_write", "letter"),
         ("letter_read", "letter"),
+        ("letter_lock_update", "letter"),
     ],
 )
 def test_public_tool_contract_allows_current_compatibility_public_names(tool_name, replacement):

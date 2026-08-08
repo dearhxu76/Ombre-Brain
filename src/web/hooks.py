@@ -25,6 +25,7 @@ from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
+from tools.plan.core import letter_lock_state
 
 from . import _shared as sh
 
@@ -236,6 +237,17 @@ def register(mcp) -> None:
         if not _is_hook_request_authorized(request):
             return PlainTextResponse("", status_code=401)
 
+        # Token-authenticated SessionStart is the AI consumer.  A valid
+        # Dashboard session is the human consumer.  Deliberately public hooks
+        # remain unauthenticated and can never receive locked Letter content.
+        if _valid_hook_token(request):
+            caller_side = "ai"
+        else:
+            try:
+                caller_side = "human" if sh._is_authenticated(request) else None
+            except Exception:
+                caller_side = None
+
         # This endpoint performs expensive provider work and is intended for a
         # non-browser SessionStart hook.  Do not let an ambient dashboard cookie
         # turn a cross-origin GET into provider spend; explicit hook tokens are
@@ -397,6 +409,7 @@ def register(mcp) -> None:
                         pool = [
                             letter for letter in letters
                             if letter["metadata"].get("author") in wanted
+                            and not letter_lock_state(letter, caller_side)["locked"]
                         ]
                         if not pool:
                             return None
@@ -416,6 +429,16 @@ def register(mcp) -> None:
                         if letter is None:
                             continue
                         meta = letter["metadata"]
+                        state = letter_lock_state(letter, caller_side)
+                        if state["expired"]:
+                            await sh.bucket_mgr.update(
+                                letter["id"], lock_type="none", unlock_date=None
+                            )
+                        if state["stored_lock_type"] != "none":
+                            # Locked Letters created by V1 always snapshot the
+                            # actual writer name.  Even the owner's full-text
+                            # excerpt must not introduce generic side labels.
+                            tag = str(meta.get("writer_name") or "").strip() or tag
                         date = meta.get("letter_date") or str(meta.get("created", ""))[:10]
                         title = _bounded_text(meta.get("title") or meta.get("name"), 200)
                         excerpt = strip_wikilinks(str(letter.get("content") or ""))[:400]
@@ -427,6 +450,47 @@ def register(mcp) -> None:
                                 content_truncated=len(excerpt) < len(strip_wikilinks(str(letter.get("content") or ""))),
                             )
                         )
+
+                    # Locked incoming Letters are an independent existence
+                    # signal.  Do not let a newer ordinary Letter hide an older
+                    # still-locked one, and do not change the normal "latest
+                    # visible letter per direction" injection above.
+                    if caller_side is not None:
+                        incoming_by_writer: dict[str, list[tuple[dict, dict]]] = {}
+                        for letter in letters:
+                            state = letter_lock_state(letter, caller_side)
+                            if state["expired"]:
+                                await sh.bucket_mgr.update(
+                                    letter["id"], lock_type="none", unlock_date=None
+                                )
+                                continue
+                            if not state["locked"]:
+                                continue
+                            meta = letter.get("metadata") or {}
+                            writer_name = str(meta.get("writer_name") or "").strip()
+                            if not writer_name:
+                                continue
+                            incoming_by_writer.setdefault(writer_name, []).append(
+                                (letter, state)
+                            )
+
+                        for writer_name, incoming in incoming_by_writer.items():
+                            representative, state = incoming[0]
+                            if len(incoming) > 1:
+                                notice = f"{writer_name}给你留了 {len(incoming)} 封仍未解锁的信。"
+                            elif state["lock_type"] == "timed":
+                                when = str(state["unlock_date"] or "").replace("T", " ")[:16]
+                                notice = f"{writer_name}给你留了一封带锁的信，将于 {when} 解锁。"
+                            else:
+                                notice = f"{writer_name}给你留了一封永久锁信，当前不可查看。"
+                            append_block(
+                                _hook_data_block(
+                                    representative,
+                                    notice,
+                                    role="locked_letter_notice",
+                                    content_truncated=False,
+                                )
+                            )
 
                 self_buckets = [
                     bucket for bucket in all_buckets

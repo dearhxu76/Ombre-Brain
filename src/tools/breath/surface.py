@@ -83,8 +83,8 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         )
 
     # --- pinned/protected 桶置顶（排除 letter 桶：letter 的 importance=10 不代表核心准则）---
-    # 注意：pinned 提取在 anchor 过滤 *之前*，保证 anchor+pinned 桶也能出现在核心准则段。
-    # pinned 优先级高于 anchor（她/他钉选的原则永远可见）。
+    # pinned 与 anchor 在正常写入路径互斥：钉选会清除 anchor，设 anchor 会拒绝 pinned 桶。
+    # 末尾的 anchor 排除是脏数据防御；若异常并存，仍按 anchor 语义不主动浮现。
     pinned_buckets = [
         b for b in all_buckets
         if (

@@ -2,6 +2,27 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 2.14.0
+
+### 新增 / Added
+
+- Letter 支持 `none`、`timed`、`permanent` 三种锁状态；新增只修改锁元数据的
+  `letter_lock_update`，锁所有权只由 Dashboard/MCP/stdio 等可信入口确定，署名不参与权限。
+- Dashboard 可创建、查看和管理自己的锁信；对方尚未开放的信只显示实际关系名、时间与锁状态，标题和正文不返回。
+- SessionStart 按 hook Token、Dashboard session 或公开未认证入口采用对应可见性；锁提示只使用已有实际关系名。
+- Letter 语义检索在向量反序列化和相似度排序前排除当前不可见候选，避免查询命中本身泄露内容。
+
+### 兼容与边界 / Compatibility & Boundary
+
+- 历史 Letter 缺少锁字段时按无锁处理，不迁移数据；旧调用不传锁参数时行为不变。
+- 不新增必填环境变量，不修改 OAuth、Token、Docker Compose 或 multi-owner 配置。
+- 时间锁是应用层关系边界，不是磁盘加密；拥有 vault 或宿主机文件权限的人仍能读取 Markdown 原文。
+- 保留 Dashboard 原有 Letter 原稿编辑：历史/无锁 Letter 和锁拥有者自己的锁信可编辑；原稿编辑与锁管理必须分开请求，来信方未解锁内容不可读写，编辑后正常刷新搜索索引。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.14.0`。
+
 ## 2.13.1
 
 ### 修复 / Fixed

@@ -423,6 +423,10 @@ _METADATA_TEXT_LIMITS = {
     "user_name": 120,
     "title": 120,
     "letter_date": 64,
+    "lock_type": 16,
+    "unlock_date": 64,
+    "locked_by": 16,
+    "writer_name": 120,
     "why_remembered": _WHY_REMEMBERED_MAX,
     "triggered_by": _TRIGGERED_BY_MAX,
     "source_tool": _SOURCE_TOOL_MAX,
@@ -1399,6 +1403,10 @@ class BucketManager:
         imported: bool = False,
         source_refs: Any = None,
         event_actor: str = "system",
+        lock_type: str = "",
+        unlock_date: str | None = None,
+        locked_by: str = "",
+        writer_name: str = "",
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -1490,6 +1498,18 @@ class BucketManager:
         }
         if title:
             metadata["title"] = title
+        # Letter access metadata is written atomically with the original
+        # content.  A create-then-update window could briefly expose a locked
+        # body to a concurrent reader or vector search.
+        if bucket_type == "letter" and locked_by:
+            metadata["lock_type"] = str(lock_type or "none")[:16]
+            if unlock_date:
+                metadata["unlock_date"] = str(unlock_date)[:64]
+            metadata["locked_by"] = str(locked_by)[:16]
+            if writer_name:
+                metadata["writer_name"] = self._sanitize_text(
+                    str(writer_name)
+                ).strip()[:120]
         if source_refs:
             metadata["source_refs"] = source_refs
         if imported:
@@ -2381,6 +2401,7 @@ class BucketManager:
         # 由 server.py 的 plan() / trace() / /api/plans/{id}/action 维护，bucket_manager 不参与生成。
         for k in ("status", "type", "resolution_reason", "resolved_by",
                   "related_bucket", "author", "user_name", "letter_date",
+                  "lock_type", "unlock_date", "locked_by", "writer_name",
                   "change_log",
                   # iter 1.8 新增字段。除 weight 外全部透传不转换。
                   # weight 在 plan 上才有意义；这里不在这个循环里校验类型，由上层 server.py 保证传入范围。

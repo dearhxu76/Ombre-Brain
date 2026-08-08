@@ -103,6 +103,7 @@ class PublicToolDesignContract:
                 "release": "anchor",
                 "letter_write": "letter",
                 "letter_read": "letter",
+                "letter_lock_update": "letter",
             },
             engineering_public_aliases={
                 "remember": "hold/grow",

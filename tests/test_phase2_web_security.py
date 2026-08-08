@@ -521,6 +521,117 @@ async def test_openai_compat_passes_configured_extra_body(tmp_path):
     assert captured["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
+@pytest.mark.parametrize(
+    ("model", "expected_limit_key"),
+    [
+        ("gpt-5", "max_completion_tokens"),
+        ("openai/gpt-5-mini", "max_completion_tokens"),
+        ("models/gpt-5.1", "max_completion_tokens"),
+        ("gpt-50x", "max_tokens"),
+        ("deepseek-v4-flash", "max_tokens"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_openai_compat_uses_model_specific_completion_limit(
+    tmp_path,
+    model,
+    expected_limit_key,
+):
+    dehydrator = Dehydrator(
+        {
+            "buckets_dir": str(tmp_path),
+            "dehydration": {"api_key": "test-key", "model": model},
+        }
+    )
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="OK"))]
+            )
+
+    dehydrator.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=Completions())
+    )
+    try:
+        result = await dehydrator._chat_once("system", "user", max_tokens=7)
+    finally:
+        dehydrator.close()
+
+    other_limit_key = (
+        "max_tokens"
+        if expected_limit_key == "max_completion_tokens"
+        else "max_completion_tokens"
+    )
+    assert result == "OK"
+    assert captured[expected_limit_key] == 7
+    assert other_limit_key not in captured
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_limit_key"),
+    [
+        ("azure/gpt-5.1", "max_completion_tokens"),
+        ("gpt-4o-mini", "max_tokens"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dehydration_probe_uses_model_specific_completion_limit(
+    monkeypatch,
+    model,
+    expected_limit_key,
+):
+    calls = []
+
+    class Response:
+        status_code = 200
+
+    class Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def post(self, url, **kwargs):
+            calls.append((url, kwargs))
+            return Response()
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    monkeypatch.setattr(config_api_web.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(
+        config_api_web.sh,
+        "config",
+        {
+            "dehydration": {
+                "api_key": "probe-key",
+                "base_url": "https://provider.example/v1",
+                "model": model,
+            }
+        },
+    )
+    mcp = FakeMCP()
+    config_api_web.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/test/dehydration")](object())
+
+    other_limit_key = (
+        "max_tokens"
+        if expected_limit_key == "max_completion_tokens"
+        else "max_completion_tokens"
+    )
+    assert response.status_code == 200
+    [(url, kwargs)] = calls
+    assert url == "https://provider.example/v1/chat/completions"
+    assert kwargs["json"][expected_limit_key] == 5
+    assert other_limit_key not in kwargs["json"]
+
+
 @pytest.mark.asyncio
 async def test_gemini_model_catalog_keeps_api_key_out_of_query(monkeypatch):
     calls = []
@@ -786,6 +897,7 @@ async def test_mcp_exception_secrets_never_reach_response_persistence_or_logs(
         "pulse",
         "plan",
         "letter_write",
+        "letter_lock_update",
         "letter_read",
         "I",
     ),

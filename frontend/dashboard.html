@@ -2234,6 +2234,15 @@
         <label>标题 <span class="en">Title</span></label>
         <input type="text" id="letter-title" placeholder="标题（可选）/ Title (optional)" />
       </div>
+      <div class="config-row">
+        <label>可见时间 <span class="en">Lock</span></label>
+        <select id="letter-lock-type" onchange="toggleLetterUnlockInput()" style="flex:0 0 180px;">
+          <option value="none">立即可读</option>
+          <option value="timed">定时解锁</option>
+          <option value="permanent">永久锁</option>
+        </select>
+        <input type="datetime-local" id="letter-unlock-date" style="display:none;flex:0 0 240px;" />
+      </div>
       <div class="config-row" style="align-items:flex-start;">
         <label style="padding-top:10px;">正文 <span class="en">Body</span></label>
         <textarea id="letter-content" placeholder="…" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:12px 14px;border-radius:2px;font-family:inherit;font-size:13px;line-height:1.7;min-height:180px;resize:vertical;box-shadow:inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);"></textarea>
@@ -9283,17 +9292,20 @@ async function loadLetters() {
 }
 
 function _renderLetter(l) {
-  // 用户侧显示 user_name；AI 侧（及任意自定义署名）原样显示存储的 author 值。
-  const who = l.author === 'user' ? (l.user_name || 'user') : (l.author || 'AI');
+  const who = l.writer_name || (l.author === 'user' ? (l.user_name || l.author) : l.author);
   const accentColor = l.author !== 'user' ? 'var(--accent)' : 'var(--text-dim)';
+  const lockLabel = l.lock_type === 'timed'
+    ? `定时锁${l.unlock_date ? ' · ' + esc(String(l.unlock_date).replace('T', ' ').slice(0, 16)) + ' 解锁' : ''}`
+    : (l.lock_type === 'permanent' ? '永久锁 · 当前不可查看' : '立即可读');
   return `<article style="background:var(--surface);border:1px solid var(--border);border-radius:2px;padding:18px 22px;box-shadow:4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);" data-id="${escAttr(l.id)}">
     <div style="font-size:11px;color:var(--text-dim);letter-spacing:0.15em;display:flex;justify-content:space-between;margin-bottom:8px;">
       <span style="color:${accentColor};font-weight:600;">${esc(who)}</span><span>${esc(l.date || '')}</span>
     </div>
-    ${l.title ? `<div style="font-family:'Cormorant Garamond', serif;font-size:17px;font-weight:600;margin-bottom:8px;color:var(--text);">${esc(l.title)}</div>` : ''}
-    <div style="white-space:pre-wrap;font-size:14px;line-height:1.75;color:var(--text);">${esc(l.content || '')}</div>
+    <div style="font-size:11px;color:${l.locked ? 'var(--accent)' : 'var(--text-dim)'};margin-bottom:8px;">${lockLabel}</div>
+    ${l.locked ? '<div style="font-size:13px;color:var(--text-dim);padding:10px 0;">这封信尚未向你开放。</div>' : `${l.title ? `<div style="font-family:'Cormorant Garamond', serif;font-size:17px;font-weight:600;margin-bottom:8px;color:var(--text);">${esc(l.title)}</div>` : ''}<div style="white-space:pre-wrap;font-size:14px;line-height:1.75;color:var(--text);">${esc(l.content || '')}</div>`}
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;font-size:11px;">
-      <button data-letter-id="${escAttr(l.id)}" onclick="editLetter(this.dataset.letterId)" title="编辑" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="pencil" style="width:13px;height:13px;"></i></button>
+      ${!l.locked ? `<button data-letter-id="${escAttr(l.id)}" onclick="editLetter(this.dataset.letterId)" title="编辑" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="pencil" style="width:13px;height:13px;"></i></button>` : ''}
+      ${l.lock_owner ? `<button data-letter-id="${escAttr(l.id)}" onclick="manageLetterLock(this.dataset.letterId)" title="修改锁状态" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="lock-keyhole" style="width:13px;height:13px;"></i> 锁</button>` : ''}
       <button data-letter-id="${escAttr(l.id)}" onclick="deleteLetter(this.dataset.letterId)" title="删除" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--accent);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="trash-2" style="width:13px;height:13px;"></i></button>
     </div>
   </article>`;
@@ -9309,7 +9321,16 @@ async function sendLetter() {
     title: document.getElementById('letter-title').value,
     date: document.getElementById('letter-date').value,
     content: document.getElementById('letter-content').value,
+    lock_type: document.getElementById('letter-lock-type').value,
   };
+  if (body.lock_type === 'timed') {
+    const rawUnlock = document.getElementById('letter-unlock-date').value;
+    if (!rawUnlock) {
+      status.style.color = 'var(--negative)'; status.textContent = '请选择解锁时间';
+      return;
+    }
+    body.unlock_date = new Date(rawUnlock).toISOString();
+  }
   if (!body.content.trim()) {
     status.style.color = 'var(--negative)'; status.textContent = '内容为空';
     return;
@@ -9325,6 +9346,9 @@ async function sendLetter() {
       status.innerHTML = _SV.ok + ' 已寄出 · ' + esc(d.id);
       document.getElementById('letter-content').value = '';
       document.getElementById('letter-title').value = '';
+      document.getElementById('letter-lock-type').value = 'none';
+      document.getElementById('letter-unlock-date').value = '';
+      toggleLetterUnlockInput();
       loadLetters();
     } else {
       status.style.color = 'var(--negative)';
@@ -9338,7 +9362,7 @@ async function sendLetter() {
 
 async function editLetter(id) {
   const l = _lettersCache.find(x => x.id === id);
-  if (!l) { alert('未找到该信件 / Letter not found'); return; }
+  if (!l || l.locked) { alert('这封信当前不可编辑 / Letter unavailable'); return; }
   const newTitle = prompt('标题（留空则不改）：', l.title || '');
   if (newTitle === null) return;
   const newDate = prompt('日期 YYYY-MM-DD（留空则不改）：', l.date || '');
@@ -9351,6 +9375,31 @@ async function editLetter(id) {
   if (newContent !== (l.content || '') && newContent.trim() !== '') body.content = newContent;
   if (!Object.keys(body).length) { alert('未做任何修改 / No changes made'); return; }
   if (!confirm('确认保存修改？ / Save changes?')) return;
+  try {
+    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id), {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.ok) { alert('已更新 / Updated'); loadLetters(); }
+    else { alert(d.error || '更新失败'); }
+  } catch (e) { alert(e.message); }
+}
+
+async function manageLetterLock(id) {
+  const l = _lettersCache.find(x => x.id === id);
+  if (!l) { alert('未找到该信件 / Letter not found'); return; }
+  const next = prompt('新的锁状态：none / timed / permanent', l.lock_type || 'none');
+  if (next === null) return;
+  const lockType = next.trim().toLowerCase();
+  if (!['none', 'timed', 'permanent'].includes(lockType)) { alert('锁状态无效'); return; }
+  const body = {lock_type: lockType};
+  if (lockType === 'timed') {
+    const raw = prompt('解锁时间（带时区的 ISO 8601，例如 2026-08-12T20:00:00+08:00）：', l.unlock_date || '');
+    if (raw === null) return;
+    body.unlock_date = raw.trim();
+  }
+  if (!confirm('确认只修改这封信的锁状态？原稿不会改变。')) return;
   try {
     const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id), {
       method: 'PATCH', headers: {'Content-Type':'application/json'},
@@ -9445,6 +9494,11 @@ function refreshAuthenticatedActiveView() {
   if (!target) target = document.querySelector('.tab.active');
   if (target) return activateDashboardTab(target);
   return Promise.resolve([]);
+}
+
+function toggleLetterUnlockInput() {
+  const type = document.getElementById('letter-lock-type').value;
+  document.getElementById('letter-unlock-date').style.display = type === 'timed' ? '' : 'none';
 }
 
 // ── 给作者反馈 ──────────────────────────────────────────────

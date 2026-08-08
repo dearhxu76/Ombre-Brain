@@ -1,4 +1,4 @@
-"""Real streamable-HTTP integration coverage for all 15 public MCP tools.
+"""Real streamable-HTTP integration coverage for all public MCP tools.
 
 Run this file against an isolated Docker service by setting
 OMBRE_DOCKER_INTEGRATION_URL=http://ombre-brain:8000/mcp.
@@ -18,6 +18,7 @@ import pytest
 
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
+MCP_TOKEN = os.environ.get("OMBRE_DOCKER_MCP_TOKEN", "").strip()
 EXPECT_COMPRESSION_PROVIDER = os.environ.get(
     "OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -36,6 +37,7 @@ EXPECTED_TOOLS = {
     "pulse",
     "plan",
     "letter_write",
+    "letter_lock_update",
     "letter_read",
     "I",
     "dream",
@@ -54,6 +56,7 @@ EXPECTED_TOOL_ORDER = (
     "pulse",
     "plan",
     "letter_write",
+    "letter_lock_update",
     "letter_read",
     "I",
 )
@@ -122,9 +125,13 @@ EXPECTED_TOOL_PROPERTIES = {
     "release": {"bucket_id"},
     "pulse": {"include_archive"},
     "plan": {"content", "status", "related_bucket", "weight", "why_remembered"},
-    "letter_write": {"author", "content", "user_name", "title", "date", "ai_name"},
+    "letter_write": {
+        "author", "content", "user_name", "title", "date", "ai_name",
+        "lock_type", "unlock_date",
+    },
+    "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
-    "I": {"content", "aspect", "read", "limit"},
+    "I": {"content", "aspect", "read", "limit", "promote"},
     "dream": {"window_hours", "inspiration"},
 }
 
@@ -137,6 +144,7 @@ EXPECTED_REQUIRED_PROPERTIES = {
     "release": {"bucket_id"},
     "plan": {"content"},
     "letter_write": {"author", "content"},
+    "letter_lock_update": {"letter_id", "lock_type"},
 }
 
 
@@ -167,6 +175,8 @@ class MCPClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+        if MCP_TOKEN:
+            headers["Authorization"] = f"Bearer {MCP_TOKEN}"
         if self.protocol_version >= "2025-06-18":
             headers["MCP-Protocol-Version"] = self.protocol_version
         response = self.client.post(self.url, headers=headers, json=payload)
@@ -724,12 +734,44 @@ def test_letter_tools_preserve_and_filter_custom_author(mcp_client):
     assert author in result
 
 
-def test_I_writes_and_reads_self_description(mcp_client):
+def test_letter_time_lock_write_read_and_owner_unlock_in_real_container(mcp_client):
+    marker = _marker("locked-letter")
+    title = _marker("locked-title")
+    written = mcp_client.call(
+        "letter_write",
+        {
+            "author": "ai",
+            "content": marker,
+            "title": title,
+            "lock_type": "permanent",
+        },
+    )
+    receipt = json.loads(written)
+    assert receipt["stored"] is True
+    assert receipt["lock_type"] == "permanent"
+    assert marker not in written and title not in written
+
+    owner_read = mcp_client.call(
+        "letter_read", {"query": marker, "limit": 10}
+    )
+    assert marker in owner_read and title in owner_read
+
+    updated = json.loads(mcp_client.call(
+        "letter_lock_update",
+        {"letter_id": receipt["letter_id"], "lock_type": "none"},
+    ))
+    assert updated["updated"] is True
+    assert updated["lock_type"] == "none"
+
+
+def test_I_writes_and_reads_pending_self_description(mcp_client):
     marker = _marker("self")
     written = mcp_client.call("I", {"content": marker, "aspect": "values"})
     assert _bucket_id(written)
+    assert "这还只是一个念头，不是自我认知" in written
+
     read_back = mcp_client.call("I", {"read": True, "limit": 20})
-    assert "=== 我的自我认知" in read_back
+    assert "=== 正在沉淀的「我觉得」" in read_back
     assert marker in read_back
 
 
@@ -754,7 +796,7 @@ def test_dream_inspiration_is_explicit_and_does_not_add_a_tool(mcp_client):
         assert "Spark 灵感候选" not in ordinary
         assert "Spark 灵感候选（显式请求、仅本次响应）" in inspired
         assert "不是事实、当前立场、行动建议或工具许可" in inspired
-        assert len(mcp_client.list_tools()) == 15
+        assert len(mcp_client.list_tools()) == 16
     finally:
         cleanup = mcp_client.call(
             "trace",
@@ -864,10 +906,16 @@ def test_trace_rejects_oversized_replacement_without_losing_original(mcp_client)
 
 
 def test_http_transport_rejects_body_above_global_limit():
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+    }
+    if MCP_TOKEN:
+        headers["Authorization"] = f"Bearer {MCP_TOKEN}"
     response = httpx.post(
         MCP_URL,
         content=b"x" * (4 * 1024 * 1024 + 1),
-        headers={"Content-Type": "application/json", "Accept": "application/json, text/event-stream"},
+        headers=headers,
         timeout=30,
     )
     assert response.status_code == 413

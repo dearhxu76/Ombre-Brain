@@ -49,6 +49,15 @@ class _Manager:
         assert include_archive is False
         return list(self.buckets)
 
+    async def update(self, bucket_id, **updates):
+        bucket = next(item for item in self.buckets if item["id"] == bucket_id)
+        for key, value in updates.items():
+            if value is None:
+                bucket["metadata"].pop(key, None)
+            else:
+                bucket["metadata"][key] = value
+        return True
+
 
 class _Decay:
     @staticmethod
@@ -165,6 +174,185 @@ async def test_hook_frames_injected_memory_letter_and_self_text_as_data(monkeypa
     assert text.count("<<<END_STORED_MEMORY_DATA") == 3
     assert text.count(injection) == 3
     assert "payload_sha256:" in text
+
+
+@pytest.mark.asyncio
+async def test_hook_token_uses_ai_view_and_locked_human_letter_is_notice_only(monkeypatch):
+    secret = "private locked letter body"
+    title = "private locked title"
+    buckets = [
+        _bucket(
+            "human-locked",
+            secret,
+            type="letter",
+            author="user",
+            title=title,
+            writer_name="江乔生",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="human",
+        )
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request())
+    text = response.body.decode("utf-8")
+
+    assert "江乔生给你留了一封永久锁信" in text
+    assert "当前不可查看" in text
+    assert secret not in text
+    assert title not in text
+
+
+@pytest.mark.asyncio
+async def test_dashboard_cookie_hook_uses_human_view_for_ai_locked_letter(monkeypatch):
+    monkeypatch.setenv("AI_NAME", "周家明")
+    monkeypatch.setattr(hooks.sh, "_is_authenticated", lambda request: True)
+    buckets = [
+        _bucket(
+            "ai-locked",
+            "secret from other side",
+            type="letter",
+            author="周家明",
+            title="hidden title",
+            writer_name="周家明",
+            lock_type="timed",
+            unlock_date="2030-08-12T20:00:00+08:00",
+            locked_by="ai",
+        )
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request(token=""))
+    text = response.body.decode("utf-8")
+
+    assert "周家明给你留了一封带锁的信" in text
+    assert "2030-08-12 20:00" in text
+    assert "secret from other side" not in text
+    assert "hidden title" not in text
+
+
+@pytest.mark.asyncio
+async def test_hook_lock_owner_gets_full_letter_with_actual_name_not_generic_side(monkeypatch):
+    monkeypatch.setenv("AI_NAME", "周家明")
+    buckets = [
+        _bucket(
+            "ai-own-lock",
+            "owner visible locked body",
+            type="letter",
+            author="周家明",
+            title="owner visible title",
+            writer_name="周家明",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="ai",
+        )
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request())
+    text = response.body.decode("utf-8")
+    assert "owner visible locked body" in text
+    assert "owner visible title" in text
+    assert "[周家明]" in text
+    assert "你→user" not in text
+    assert "给你留" not in text
+
+
+@pytest.mark.asyncio
+async def test_newer_open_letter_does_not_hide_older_incoming_lock_notice(monkeypatch):
+    buckets = [
+        _bucket(
+            "old-lock",
+            "older hidden body",
+            type="letter",
+            author="user",
+            title="older hidden title",
+            writer_name="江乔生",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="human",
+            created="2026-08-01T00:00:00+08:00",
+        ),
+        _bucket(
+            "new-open",
+            "newer ordinary letter",
+            type="letter",
+            author="user",
+            created="2026-08-08T00:00:00+08:00",
+        ),
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request())
+    text = response.body.decode("utf-8")
+    assert "newer ordinary letter" in text
+    assert "江乔生给你留了一封永久锁信" in text
+    assert "older hidden body" not in text
+    assert "older hidden title" not in text
+
+
+@pytest.mark.asyncio
+async def test_multiple_incoming_locks_are_safely_summarized(monkeypatch):
+    buckets = [
+        _bucket(
+            f"locked-{index}",
+            f"hidden body {index}",
+            type="letter",
+            author="user",
+            title=f"hidden title {index}",
+            writer_name="江乔生",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="human",
+            created=f"2026-08-0{index + 1}T00:00:00+08:00",
+        )
+        for index in range(2)
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request())
+    text = response.body.decode("utf-8")
+    assert "江乔生给你留了 2 封仍未解锁的信" in text
+    assert "hidden body" not in text
+    assert "hidden title" not in text
+
+
+@pytest.mark.asyncio
+async def test_expired_timed_letter_is_not_counted_as_still_locked(monkeypatch):
+    buckets = [
+        _bucket(
+            "expired-lock",
+            "expired letter is visible",
+            type="letter",
+            author="user",
+            writer_name="江乔生",
+            lock_type="timed",
+            unlock_date="2020-01-01T00:00:00+08:00",
+            locked_by="human",
+        )
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request())
+    text = response.body.decode("utf-8")
+    assert "expired letter is visible" in text
+    assert "给你留了一封带锁的信" not in text
+    assert buckets[0]["metadata"]["lock_type"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_public_hook_never_receives_locked_letter_content_or_notice(monkeypatch):
+    monkeypatch.setenv("OMBRE_HOOK_ALLOW_PUBLIC", "1")
+    monkeypatch.setattr(hooks.sh, "_is_authenticated", lambda request: False)
+    buckets = [
+        _bucket(
+            "locked",
+            "public must not see this",
+            type="letter",
+            author="user",
+            writer_name="江乔生",
+            lock_type="permanent",
+            unlock_date="9999-12-31",
+            locked_by="human",
+        ),
+        _bucket("open", "public historical open letter", type="letter", author="user"),
+    ]
+    response = await _handler(monkeypatch, buckets, _EchoDehydrator())(_Request(token=""))
+    text = response.body.decode("utf-8")
+
+    assert "public must not see this" not in text
+    assert "江乔生给你留" not in text
+    # Existing public-hook behavior for unlocked historical Letters remains.
+    assert "public historical open letter" in text
 
 
 @pytest.mark.asyncio

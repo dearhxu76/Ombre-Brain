@@ -40,6 +40,11 @@ from ombrebrain.security.public_origin import configured_public_origin
 from . import _shared as sh
 
 try:
+    from dehydrator import chat_completion_token_limit
+except ImportError:  # pragma: no cover
+    from ..dehydrator import chat_completion_token_limit
+
+try:
     from utils import (  # type: ignore
         get_ai_name as _get_ai_name,
         get_owner_name as _get_owner_name,
@@ -958,7 +963,11 @@ def register(mcp) -> None:
         try:
             import httpx as _httpx
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-            payload = {"model": model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5}
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": "hi"}],
+                **chat_completion_token_limit(model, 5),
+            }
             async with _httpx.AsyncClient(timeout=15) as client:
                 r = await client.post(f"{base_url.rstrip('/')}/chat/completions", json=payload, headers=headers)
             if r.status_code in (200, 201):

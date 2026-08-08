@@ -14,6 +14,7 @@ import pytest
 import tools._runtime as rt
 from tools.grow import dispatch
 from tools.grow.core import grow_core, grow_items
+from tools.source_read import dispatch as source_read
 from errors import PublicToolError
 from ombrebrain.storage.source_store import SourceStore
 
@@ -225,6 +226,126 @@ async def test_invalid_source_range_rejects_batch_before_any_write(grow_rt):
     assert "超出原文总行数" in out
     assert await bucket_mgr.list_all(include_archive=False) == []
     assert not list((Path(bucket_mgr.base_dir) / "_sources").glob("*.source"))
+
+
+@pytest.mark.asyncio
+async def test_obviously_shifted_source_ranges_are_rejected_before_write(grow_rt):
+    bucket_mgr, stub = grow_rt
+    source = (
+        "开场：这两行只是寒暄。\n"
+        "今天先聊点别的。\n"
+        "[蓝鲸计划]\n"
+        "蓝鲸计划讨论海洋声呐与深海航线。\n"
+        "大家决定继续整理蓝鲸观测记录。\n"
+        "[樱桃烘焙]\n"
+        "樱桃烘焙测试黄油面团与烤箱温度。\n"
+        "最后记录樱桃派的配方调整。\n"
+        "[火星旅行]\n"
+        "火星旅行讨论着陆舱与红色沙丘路线。\n"
+        "最后确认火星基地的补给窗口。\n"
+    )
+    items = [
+        {
+            "title": "蓝鲸计划",
+            "content": "蓝鲸计划围绕海洋声呐、深海航线和观测记录展开。",
+            "source_ranges": [[1, 2]],
+        },
+        {
+            "title": "樱桃烘焙",
+            "content": "樱桃烘焙记录黄油面团、烤箱温度和樱桃派配方。",
+            "source_ranges": [[3, 5]],
+        },
+        {
+            "title": "火星旅行",
+            "content": "火星旅行记录着陆舱、红色沙丘路线与基地补给窗口。",
+            "source_ranges": [[6, 8]],
+        },
+    ]
+
+    out = await dispatch(content=source, items=items)
+
+    assert "source_ranges 疑似与 items 错位" in out
+    assert stub.analyze_calls == 0
+    assert await bucket_mgr.list_all(include_archive=False) == []
+    assert not list((Path(bucket_mgr.base_dir) / "_sources").glob("*.source"))
+
+
+@pytest.mark.asyncio
+async def test_single_title_anchor_mismatch_does_not_guess(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    source = (
+        "开场寒暄。\n"
+        "这里是调用方明确指定的证据行。\n"
+        "[蓝鲸计划]\n"
+        "蓝鲸计划讨论海洋声呐与深海航线。\n"
+    )
+    out = await dispatch(
+        content=source,
+        items=[{
+            "title": "蓝鲸计划",
+            "content": "蓝鲸计划围绕海洋声呐与深海航线展开。",
+            "source_ranges": [[1, 2]],
+        }],
+    )
+
+    assert "1条(预拆分·逐字)" in out
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    assert len(buckets) == 1
+    assert buckets[0]["metadata"]["source_refs"][0]["ranges"] == [[1, 2]]
+
+
+@pytest.mark.asyncio
+async def test_aligned_multi_event_source_ranges_round_trip(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    source = (
+        "开场：这两行只是寒暄。\n"
+        "今天先聊点别的。\n"
+        "[蓝鲸计划]\n"
+        "蓝鲸计划讨论海洋声呐与深海航线。\n"
+        "大家决定继续整理蓝鲸观测记录。\n"
+        "[樱桃烘焙]\n"
+        "樱桃烘焙测试黄油面团与烤箱温度。\n"
+        "最后记录樱桃派的配方调整。\n"
+        "[火星旅行]\n"
+        "火星旅行讨论着陆舱与红色沙丘路线。\n"
+        "最后确认火星基地的补给窗口。\n"
+    )
+    items = [
+        {
+            "title": "蓝鲸计划",
+            "content": "蓝鲸计划围绕海洋声呐、深海航线和观测记录展开。",
+            "source_ranges": [[3, 5]],
+        },
+        {
+            "title": "樱桃烘焙",
+            "content": "樱桃烘焙记录黄油面团、烤箱温度和樱桃派配方。",
+            "source_ranges": [[6, 8]],
+        },
+        {
+            "title": "火星旅行",
+            "content": "火星旅行记录着陆舱、红色沙丘路线与基地补给窗口。",
+            "source_ranges": [[9, 11]],
+        },
+    ]
+
+    out = await dispatch(content=source, items=items)
+    assert "3条(预拆分·逐字)" in out
+
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    by_title = {bucket["metadata"]["title"]: bucket for bucket in buckets}
+    first = await source_read(by_title["蓝鲸计划"]["id"], "蓝鲸计划")
+    middle = await source_read(by_title["樱桃烘焙"]["id"], "樱桃烘焙")
+    last = await source_read(by_title["火星旅行"]["id"], "火星旅行")
+    full = await source_read(
+        by_title["蓝鲸计划"]["id"], "蓝鲸计划", scope="full_source"
+    )
+    denied = await source_read(by_title["蓝鲸计划"]["id"], "错误标题")
+
+    assert "深海航线" in first and "樱桃派" not in first
+    assert "樱桃派" in middle and "火星基地" not in middle
+    assert "火星基地" in last and "蓝鲸观测" not in last
+    assert "开场：这两行只是寒暄。" in full and "火星基地" in full
+    assert "标题不匹配" in denied
 
 
 @pytest.mark.asyncio

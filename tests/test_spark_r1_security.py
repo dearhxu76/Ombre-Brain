@@ -335,7 +335,7 @@ def test_docker_and_public_mcp_surfaces_remain_sealed():
         r"(?:\.(?:/)?(?:\s|$)|\[\s*[\"']\./?[\"'])",
         dockerfile,
     )
-    assert len(re.findall(r"(?m)^@mcp\.tool\(\)", server)) == 15
+    assert len(re.findall(r"(?m)^@mcp\.tool\(\)", server)) == 16
 
 
 def test_hot_update_plan_ignores_tools_even_when_manifest_lists_them():
