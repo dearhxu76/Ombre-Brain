@@ -23,6 +23,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "W=$(TZ=Asia/Shanghai date +%u); case $W in 1) D=周一;; 2) D=周二;; 3) D=周三;; 4) D=周四;; 5) D=周五;; 6) D=周六;; 7) D=周日;; esac; TZ=Asia/Shanghai date \"+【%Y-%m-%d $D %H:%M · Asia/Shanghai】\"",
+            "timeout": 5
+          }
+        ]
+      }
     ]
   }
 }
