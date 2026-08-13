@@ -84,6 +84,93 @@ async def test_pulse_shows_special_bucket_counts_separately(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pulse_marks_anchor_without_replacing_icon_and_release_clears_it(
+    monkeypatch,
+):
+    from tools.anchor import core as anchor_core
+
+    class FakeDecay:
+        is_running = True
+
+        async def ensure_started(self):
+            return None
+
+        def calculate_score(self, _meta):
+            return 1.0
+
+    class FakeBucketManager:
+        def __init__(self):
+            self.buckets = [
+                {
+                    "id": "anchor-1",
+                    "content": "anchor body",
+                    "metadata": {
+                        "type": "permanent",
+                        "name": "坐标系",
+                        "domain": ["关系"],
+                        "importance": 9,
+                        "anchor": "true",
+                    },
+                },
+                {
+                    "id": "ordinary-1",
+                    "content": "ordinary body",
+                    "metadata": {
+                        "type": "dynamic",
+                        "name": "普通记忆",
+                        "domain": ["生活"],
+                        "importance": 5,
+                        "anchor": "false",
+                    },
+                },
+            ]
+
+        async def get_stats(self):
+            return {
+                "permanent_count": 1,
+                "dynamic_count": 1,
+                "archive_count": 0,
+                "feel_count": 0,
+                "plan_count": 0,
+                "letter_count": 0,
+                "total_size_kb": 1.0,
+            }
+
+        async def list_all(self, include_archive=False):
+            return self.buckets
+
+        async def set_anchor(self, bucket_id, value):
+            bucket = next(b for b in self.buckets if b["id"] == bucket_id)
+            if value:
+                bucket["metadata"]["anchor"] = True
+            else:
+                bucket["metadata"].pop("anchor", None)
+            count = sum(
+                1 for b in self.buckets if b["metadata"].get("anchor") is True
+            )
+            return {"ok": True, "anchor": value, "count": count, "limit": 24}
+
+    bucket_mgr = FakeBucketManager()
+    monkeypatch.setattr(anchor_core.rt, "decay_engine", FakeDecay(), raising=False)
+    monkeypatch.setattr(anchor_core.rt, "bucket_mgr", bucket_mgr, raising=False)
+    monkeypatch.setattr(anchor_core.rt, "embedding_engine", None, raising=False)
+    monkeypatch.setattr(anchor_core.rt, "mark_op", None, raising=False)
+
+    before = await anchor_core.pulse()
+    anchor_line = next(line for line in before.splitlines() if "anchor-1" in line)
+    ordinary_line = next(line for line in before.splitlines() if "ordinary-1" in line)
+
+    assert anchor_line.startswith("📦 [anchor-1]")
+    assert "⚓ [anchor]" in anchor_line
+    assert "⚓ [anchor]" not in ordinary_line
+
+    await anchor_core.anchor_release("anchor-1")
+    after = await anchor_core.pulse()
+
+    assert "⚓ [anchor]" not in after
+
+
+@pytest.mark.asyncio
 async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
     from tools.grow import shortpath
 
@@ -92,7 +179,8 @@ async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
             pass
 
     class FakeDehydrator:
-        async def analyze(self, _content):
+        async def analyze(self, _content, *, include_why=False):
+            assert include_why is True
             return {
                 "importance": 5,
                 "tags": ["短句"],
@@ -100,9 +188,13 @@ async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
                 "valence": 0.5,
                 "arousal": 0.3,
                 "suggested_name": "短内容",
+                "why_remembered": "这条会影响我后续的判断。",
             }
 
-    async def fake_merge_or_create(**_kwargs):
+    captured = {}
+
+    async def fake_merge_or_create(**kwargs):
+        captured.update(kwargs)
         return "bucket-1", False, ""
 
     async def fake_background(*_args, **_kwargs):
@@ -122,6 +214,12 @@ async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
     result = await shortpath.grow_shortpath("短句")
 
     assert "短内容已按 hold 路径保存为单条记忆" in result
+    assert captured["why_remembered"] == (
+        "这条会影响我后续的判断。"
+    )
+    assert captured["merge_why_remembered"] == (
+        "这条会影响我后续的判断。"
+    )
 
 
 @pytest.mark.asyncio

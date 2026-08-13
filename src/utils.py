@@ -542,10 +542,13 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # transport 名归一化 —— 单一真源，让 server.py / 诊断接口拿到的都是规范值。
     # 背景：远程接入（Operit / 安卓 / 自建前端等）该填 "streamable-http"，但很多人凭
     # 直觉写成 "http" / "streamable_http" / "streamablehttp" 等变体；server.py 的入口用
-    # `transport in ("sse","streamable-http")` 精确匹配，写错就悄悄退回 stdio ——
+    # `transport == "streamable-http"` 精确匹配，写错就悄悄退回 stdio ——
     # 于是根本不开 HTTP 服务、客户端一直连不上（Operit 表现为黄灯）。这里把所有等价写法
     # 收敛成规范的 "streamable-http"，避免因一个连字符/下划线的差异排查半天。
-    # 只收敛已知别名；不认识的值原样保留，交给 server.py 走 mcp.run() 报明确的错。
+    # 只收敛已知别名；不认识的值原样保留，交给 server.py 入口的显式分支报明确的错。
+    # 2026-08-09 起 legacy SSE transport（"sse"）已下线，不再是已知别名——传这个值
+    # 会原样落到 server.py 入口的拒绝分支，退出并给出清晰报错，不会被 FastMCP 自带的
+    # mcp.run(transport="sse") 悄悄接住（那条路径不受 Ombre Brain 的鉴权/CORS 中间件保护）。
     _raw_transport = str(config.get("transport", "stdio")).strip().lower()
     _transport_aliases = {
         "http": "streamable-http",
@@ -555,7 +558,6 @@ def load_config(config_path: Optional[str] = None) -> dict:
         "streamable-http": "streamable-http",
         "http-stream": "streamable-http",
         "streaming": "streamable-http",
-        "sse": "sse",
         "stdio": "stdio",
     }
     config["transport"] = _transport_aliases.get(_raw_transport, _raw_transport)

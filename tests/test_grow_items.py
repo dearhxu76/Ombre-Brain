@@ -6,6 +6,7 @@ issue 诉求：上层 AI 已拆好的正文应逐字入库，消除「廉价 LLM
 2. 存进桶的正文与传入**一字不差**；
 3. 同批共享 grow_batch_id；不传 items 时行为不变（走原 digest 路径）。
 """
+import asyncio
 from unittest.mock import MagicMock
 from pathlib import Path
 
@@ -14,6 +15,7 @@ import pytest
 import tools._runtime as rt
 from tools.grow import dispatch
 from tools.grow.core import grow_core, grow_items
+from tools.trace.core import trace_core
 from tools.source_read import dispatch as source_read
 from errors import PublicToolError
 from ombrebrain.storage.source_store import SourceStore
@@ -25,10 +27,13 @@ class StubDehydrator:
     def __init__(self):
         self.analyze_calls = 0
 
-    async def analyze(self, content):
+    async def analyze(self, content, *, include_why=False):
         self.analyze_calls += 1
-        return {"domain": ["工作"], "valence": 0.6, "arousal": 0.4,
-                "tags": ["标签"], "suggested_name": "事件"}
+        result = {"domain": ["工作"], "valence": 0.6, "arousal": 0.4,
+                  "tags": ["标签"], "suggested_name": "事件"}
+        if include_why:
+            result["why_remembered"] = "这条短记忆会影响我后续的判断。"
+        return result
 
     async def digest(self, content):
         raise AssertionError("items 模式不允许调用 digest（会造成二次改写失真）")
@@ -143,6 +148,249 @@ async def test_dict_items_preserve_explicit_metadata_and_title(grow_rt):
 
 
 @pytest.mark.asyncio
+async def test_dict_item_stores_explicit_why_remembered_on_first_create(grow_rt):
+    bucket_mgr, stub = grow_rt
+    await grow_items([{
+        "title": "保留原因",
+        "content": "调用方已经知道这条记忆为什么值得留下。",
+        "tags": [],
+        "importance": 6,
+        "domain": ["自省"],
+        "valence": 0.5,
+        "arousal": 0.3,
+        "why_remembered": "  它解释了我为什么会在未来回看这件事。  ",
+    }])
+
+    bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    assert bucket["metadata"]["why_remembered"] == (
+        "它解释了我为什么会在未来回看这件事。"
+    )
+    assert stub.analyze_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_digest_reason_is_stored_on_first_create_and_preserved_on_merge(grow_rt):
+    bucket_mgr, _stub = grow_rt
+
+    class DigestWhyDehydrator(StubDehydrator):
+        async def digest(self, _content):
+            return [{
+                "name": "重复事件",
+                "content": "这是两次 grow 都命中的同一个具体事件。",
+                "domain": ["自省"],
+                "valence": 0.5,
+                "arousal": 0.3,
+                "tags": ["同一事件"],
+                "importance": 6,
+                "why_remembered": "这个理由应该在首次新建时写入。",
+            }]
+
+    rt.dehydrator = DigestWhyDehydrator()
+    long_source = "这是一段长度超过三十个字符的原始内容，用于稳定走日记拆分路径而不是短内容快速路径。"
+
+    first = await grow_core(long_source)
+    first_bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    assert "新1合0" in first
+    assert first_bucket["metadata"]["why_remembered"] == (
+        "这个理由应该在首次新建时写入。"
+    )
+
+    second = await grow_core(long_source)
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    assert "新0合1" in second
+    assert len(buckets) == 1
+    assert buckets[0]["metadata"]["why_remembered"] == (
+        "这个理由应该在首次新建时写入。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_shortpath_reason_is_stored_on_first_create_and_preserved_on_merge(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    content = "短内容二次命中同一事件"
+
+    class ChangingWhyDehydrator(StubDehydrator):
+        async def analyze(self, content, *, include_why=False):
+            result = await super().analyze(content, include_why=include_why)
+            result["why_remembered"] = (
+                "首次新建时的自动理由。"
+                if self.analyze_calls == 1
+                else "后来的候选理由不应覆盖旧值。"
+            )
+            return result
+
+    dehydrator = ChangingWhyDehydrator()
+    rt.dehydrator = dehydrator
+
+    first = await dispatch(content=content)
+    first_bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    assert "新建" in first
+    assert first_bucket["metadata"]["why_remembered"] == (
+        "首次新建时的自动理由。"
+    )
+
+    second = await dispatch(content=content)
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    assert "合并" in second
+    assert len(buckets) == 1
+    assert buckets[0]["metadata"]["why_remembered"] == (
+        "首次新建时的自动理由。"
+    )
+    assert dehydrator.analyze_calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "candidate, expected",
+    [
+        (None, None),
+        (["不是字符串"], None),
+        ("  " + "值" * 501 + "  ", "值" * 500),
+    ],
+)
+async def test_shortpath_reason_keeps_invalid_and_length_boundaries(
+    grow_rt, candidate, expected
+):
+    bucket_mgr, _stub = grow_rt
+
+    class BoundaryWhyDehydrator(StubDehydrator):
+        async def analyze(self, content, *, include_why=False):
+            assert include_why is True
+            result = await super().analyze(content, include_why=False)
+            result["why_remembered"] = candidate
+            return result
+
+    rt.dehydrator = BoundaryWhyDehydrator()
+    await dispatch(content="短理由边界")
+
+    bucket = (await bucket_mgr.list_all(include_archive=False))[0]
+    if expected is None:
+        assert "why_remembered" not in bucket["metadata"]
+    else:
+        assert bucket["metadata"]["why_remembered"] == expected
+
+
+@pytest.mark.asyncio
+async def test_digest_merge_never_overwrites_existing_why_remembered(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    event_content = "旧桶已经有人工写下的保留理由。"
+    bucket_id = await bucket_mgr.create(
+        content=event_content,
+        title="旧理由优先",
+        why_remembered="这是旧桶中已经确认的理由。",
+    )
+
+    class DigestWhyDehydrator(StubDehydrator):
+        async def digest(self, _content):
+            return [{
+                "name": "旧理由优先",
+                "content": event_content,
+                "domain": ["自省"],
+                "valence": 0.5,
+                "arousal": 0.3,
+                "tags": ["优先级"],
+                "importance": 6,
+                "why_remembered": "这是 digest 后来生成的候选理由。",
+            }]
+
+    rt.dehydrator = DigestWhyDehydrator()
+    out = await grow_core(
+        "这是一段超过三十个字符的日记原文，用来确认自动理由不会覆盖旧桶中的人工理由。"
+    )
+
+    assert "新0合1" in out
+    stored = await bucket_mgr.get(bucket_id)
+    assert stored["metadata"]["why_remembered"] == (
+        "这是旧桶中已经确认的理由。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_items_merge_fills_empty_why_once_and_preserves_it(grow_rt):
+    bucket_mgr, _stub = grow_rt
+    event_content = "items 二次写入命中的同一个具体事件。"
+    bucket_id = await bucket_mgr.create(
+        content=event_content,
+        title="items 合并原因",
+    )
+
+    first = await grow_items([{
+        "title": "items 合并原因",
+        "content": event_content,
+        "why_remembered": "第一个非空理由。",
+    }])
+    after_first = await bucket_mgr.get(bucket_id)
+    assert "新0合1" in first
+    assert after_first["metadata"]["why_remembered"] == "第一个非空理由。"
+
+    second = await grow_items([{
+        "title": "items 合并原因",
+        "content": event_content,
+        "why_remembered": "后来的理由不应覆盖旧值。",
+    }])
+    after_second = await bucket_mgr.get(bucket_id)
+    assert "新0合1" in second
+    assert after_second["metadata"]["why_remembered"] == "第一个非空理由。"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_trace_why_wins_over_stale_grow_merge(
+    grow_rt, monkeypatch
+):
+    bucket_mgr, _stub = grow_rt
+    event_content = "grow 合并与 trace 同时为同一桶补写原因。"
+    bucket_id = await bucket_mgr.create(
+        content=event_content,
+        title="并发原因",
+    )
+    original_get = bucket_mgr.get
+    snapshot_ready = asyncio.Event()
+    trace_finished = asyncio.Event()
+    grow_task = None
+    paused_once = False
+
+    async def gated_get(target_id):
+        # grow 内部改用 asyncio.gather 并发处理各 item 后，单条 item 的
+        # merge_or_create 跑在 gather 派生的子任务里，不再是外层 grow_task
+        # 本身；用目标桶 id 匹配同样能只在 grow 触碰这个桶时暂停一次。
+        nonlocal paused_once
+        bucket = await original_get(target_id)
+        if target_id == bucket_id and not paused_once:
+            paused_once = True
+            snapshot_ready.set()
+            await trace_finished.wait()
+        return bucket
+
+    monkeypatch.setattr(bucket_mgr, "get", gated_get)
+    grow_task = asyncio.create_task(grow_items([{
+        "title": "并发原因",
+        "content": event_content,
+        "tags": [],
+        "importance": 5,
+        "domain": ["自省"],
+        "valence": 0.5,
+        "arousal": 0.3,
+        "why_remembered": "grow 基于旧快照准备补入的理由。",
+    }]))
+
+    await asyncio.wait_for(snapshot_ready.wait(), timeout=2)
+    try:
+        traced = await trace_core(
+            bucket_id,
+            why_remembered="trace 显式写入的理由。",
+        )
+        assert "已修改" in traced
+    finally:
+        trace_finished.set()
+    await asyncio.wait_for(grow_task, timeout=2)
+
+    stored = await original_get(bucket_id)
+    assert stored["metadata"]["why_remembered"] == (
+        "trace 显式写入的理由。"
+    )
+
+
+@pytest.mark.asyncio
 async def test_missing_title_and_importance_are_filled_by_analysis(grow_rt):
     bucket_mgr, _stub = grow_rt
 
@@ -156,6 +404,7 @@ async def test_missing_title_and_importance_are_filled_by_analysis(grow_rt):
                 "tags": ["模型补全"],
                 "suggested_name": "模型补齐标题",
                 "importance": 7,
+                "why_remembered": "这是打标模型候选理由，items 不得偷偷采用。",
             }
 
     dehydrator = MetadataDehydrator()
@@ -166,6 +415,7 @@ async def test_missing_title_and_importance_are_filled_by_analysis(grow_rt):
     assert bucket["metadata"]["title"] == "模型补齐标题"
     assert bucket["metadata"]["importance"] == 7
     assert bucket["metadata"]["tags"] == ["模型补全"]
+    assert "why_remembered" not in bucket["metadata"]
     assert dehydrator.analyze_calls == 1
 
 
@@ -190,6 +440,8 @@ async def test_explicit_empty_tags_are_not_refilled_by_model(grow_rt):
         ({"content": 123}, "content 必须是字符串"),
         ({"content": "越界重要度", "importance": 11}, "importance"),
         ({"content": "过长标题", "title": "长" * 121}, "120"),
+        ({"content": "原因类型错误", "why_remembered": ["不是字符串"]}, "why_remembered 必须是字符串"),
+        ({"content": "原因过长", "why_remembered": "长" * 501}, "500"),
     ],
 )
 async def test_invalid_structured_item_is_rejected_before_any_write(
@@ -202,6 +454,21 @@ async def test_invalid_structured_item_is_rejected_before_any_write(
     assert stub.analyze_calls == 0
     assert await bucket_mgr.list_all(include_archive=False) == []
     assert not list((Path(bucket_mgr.base_dir) / "_sources").glob("*.source"))
+
+
+@pytest.mark.asyncio
+async def test_items_why_remembered_counts_toward_metadata_budget(grow_rt):
+    bucket_mgr, stub = grow_rt
+    rt.config["limits"]["max_metadata_bytes"] = 64
+
+    out = await grow_items([{
+        "content": "正文不计入元数据预算。",
+        "why_remembered": "原因" * 40,
+    }])
+
+    assert "元数据过大" in out
+    assert stub.analyze_calls == 0
+    assert await bucket_mgr.list_all(include_archive=False) == []
 
 
 @pytest.mark.asyncio
@@ -362,6 +629,8 @@ async def test_grow_digest_failure_hides_provider_detail(grow_rt):
     provider_secret = "sk-provider-secret https://provider.invalid/private"
 
     class FailingDehydrator:
+        api_available = True  # key 是好的，炸的是调用本身
+
         async def digest(self, _content):
             raise RuntimeError(provider_secret)
 
@@ -370,7 +639,15 @@ async def test_grow_digest_failure_hides_provider_detail(grow_rt):
     with pytest.raises(PublicToolError) as caught:
         await grow_core("这是一段需要调用摘要服务的长内容，长度足够进入 grow 的日记拆分主路径。")
 
-    assert "OMBRE_COMPRESS_API_KEY" in caught.value.public_message
+    # key 可用时不许甩锅给 key：这条路径上绝大多数失败（供应商 5xx、超时、模型
+    # 返回空）都与 key 无关，指向 OMBRE_COMPRESS_API_KEY 会把排查方向带偏。
+    assert "OMBRE_COMPRESS_API_KEY" not in caught.value.public_message
+    assert "日记拆分" in caught.value.public_message
+    assert "桶未创建" in caught.value.public_message
+    # 也不许反过来打包票说 key 没问题：api_available 只知道「配没配」，
+    # key 填错/过期/欠费时它仍是 True，调用照样 401。
+    assert "key 配置正常" not in caught.value.public_message
+    # 供应商正文一律不得进入公开文案或日志
     assert provider_secret not in caught.value.public_message
     assert provider_secret not in str(caught.value)
     rendered_logs = "\n".join(
@@ -378,3 +655,23 @@ async def test_grow_digest_failure_hides_provider_detail(grow_rt):
     )
     assert "RuntimeError" in rendered_logs
     assert provider_secret not in rendered_logs
+
+
+@pytest.mark.asyncio
+async def test_grow_digest_blames_key_only_when_api_unavailable(grow_rt):
+    """只有 API 真的没配好时，才允许把人指向 OMBRE_COMPRESS_API_KEY。"""
+    _bucket_mgr, _stub = grow_rt
+
+    class UnconfiguredDehydrator:
+        api_available = False
+
+        async def digest(self, _content):
+            raise RuntimeError("脱水 API 不可用，请检查 config.yaml 中的 dehydration 配置")
+
+    rt.dehydrator = UnconfiguredDehydrator()
+
+    with pytest.raises(PublicToolError) as caught:
+        await grow_core("这是一段需要调用摘要服务的长内容，长度足够进入 grow 的日记拆分主路径。")
+
+    assert "OMBRE_COMPRESS_API_KEY" in caught.value.public_message
+    assert "桶未创建" in caught.value.public_message

@@ -253,6 +253,41 @@ async def test_hold_explicit_tags_replace_model_suggestions(
 
 
 @pytest.mark.asyncio
+async def test_hold_explicit_domain_wins_over_model_suggestion(
+    bucket_mgr, monkeypatch
+):
+    class Dehydrator:
+        async def analyze(self, _content):
+            return {
+                "domain": ["模型域"],
+                "valence": 0.5,
+                "arousal": 0.3,
+                "tags": [],
+                "suggested_name": "模型标题",
+            }
+
+        def invalidate_cache(self, _content):
+            return None
+
+    class Decay:
+        async def ensure_started(self):
+            return None
+
+    monkeypatch.setattr(rt, "config", {"limits": {}, "merge_threshold": 75})
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr)
+    monkeypatch.setattr(rt, "dehydrator", Dehydrator())
+    monkeypatch.setattr(rt, "decay_engine", Decay())
+    monkeypatch.setattr(rt, "logger", MagicMock())
+    monkeypatch.setattr(rt, "fire_webhook", None)
+    monkeypatch.setattr(rt, "mark_op", None)
+
+    result = await hold(content="人工 domain 优先。", domain="人工域")
+    bucket_id = result.split("→", 1)[1].split()[0]
+    bucket = await bucket_mgr.get(bucket_id)
+    assert bucket["metadata"]["domain"] == ["人工域"]
+
+
+@pytest.mark.asyncio
 async def test_title_over_limit_is_rejected_before_hold_writes(bucket_mgr, monkeypatch):
     class Decay:
         async def ensure_started(self):

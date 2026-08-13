@@ -73,6 +73,8 @@ class SurfacePolicyVM:
                 reasons.append("digested")
             if _truthy(metadata.get("anchor")):
                 reasons.append("anchor")
+            if _truthy(metadata.get("protected")):
+                reasons.append("protected")
             if bucket_type in self.private_types:
                 reasons.append("private_type")
         elif normalized_mode == SurfaceMode.IMPORTANCE:

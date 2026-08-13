@@ -123,15 +123,25 @@ def test_release_archive_omits_loose_requirements_but_keeps_lock():
 
 
 def test_legacy_archive_compatibility_requires_284_release_lock():
+    """requirements.lock.txt 内容钉死的绊线：任何改动都必须是一次清醒决定，不能顺手改掉。
+
+    2026-08-09：为修复 cryptography==49.0.0 的 PYSEC-2026-3552（无 fix 版本可选，
+    只能升级到 50.0.0），推进了 CI 的 UV_EXCLUDE_NEWER 快照并重新生成了两份锁，
+    连带升级了 mcp/openai/uvicorn 等包。这是一次明确接受的破坏性变更：仍在跑
+    v2.8.4 之前旧更新器逻辑、且尚未升级过一次的部署实例，这次热更新后可能无法
+    再走旧的 legacy 依赖回退路径，需要用户手动升级一次。基线哈希已推进到新内容；
+    下一次改锁文件时，请再一次有意识地评估这条兼容性问题，而不是让测试直接绿。
+    """
     repo_root = Path(meta.__file__).resolve().parents[2]
     lock_bytes = (repo_root / "requirements.lock.txt").read_bytes()
     normalized = lock_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
     assert hashlib.sha256(normalized).hexdigest() == (
-        "fdb24053349d8e18a55c3a5afbab8b92cc31d94b69e52359b350ab96b79001c9"
+        "08c58fcf67ab7245499faf0de69085d32185d500a3a9d19f6d9e6fda0bd0a939"
     ), (
-        "requirements.lock.txt 已变化：发布前必须先移除 requirements.txt 的 "
-        "export-ignore 兼容规则，并为旧更新器设计显式依赖迁移"
+        "requirements.lock.txt 已变化：确认这次变化是否会影响还没升级过的旧版"
+        "热更新器（尤其 v2.8.4 之前、缺少 lock 感知回退逻辑的实例），评估后再把"
+        "这里的基线哈希推进到新内容"
     )
 
 
@@ -279,7 +289,7 @@ def test_runtime_lock_probe_accepts_repository_release_lock_syntax(monkeypatch):
     lock = (repo_root / "requirements.lock.txt").read_bytes()
 
     assert meta._runtime_satisfies_locked_versions(lock) is True
-    assert b"mcp==1.28.1" in captured["content"]
+    assert b"mcp==1.29.0" in captured["content"]
 
 
 def test_runtime_lock_probe_nonzero_result_fails_closed_and_cleans_temp(

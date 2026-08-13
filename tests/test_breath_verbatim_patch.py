@@ -10,6 +10,7 @@ from tools.breath._verbatim import render_stored_bucket
 from tools.breath.importance import surface_by_importance
 from tools.breath.search import surface_search
 from tools.breath.surface import surface_default
+from utils import strip_wikilinks
 
 
 class ExplodingDehydrator:
@@ -162,12 +163,15 @@ async def test_query_multiple_buckets_return_each_body_exactly(bucket_mgr, monke
         for content in contents
     ]
     stored = {bucket_id: (await bucket_mgr.get(bucket_id))["content"] for bucket_id in ids}
+    # 展示文本只做双链正则清理（strip_wikilinks），不改磁盘原文：
+    # 磁盘上 [[原始双链]] 仍保留括号，但 breath 返回的展示文本会去掉它们。
+    displayed = {bucket_id: strip_wikilinks(content) for bucket_id, content in stored.items()}
     dehydrator = _install_runtime(bucket_mgr)
     monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
 
     output = await _search("群星校验词")
 
-    for bucket_id, expected in stored.items():
+    for bucket_id, expected in displayed.items():
         actual = _returned_body(output, bucket_id, len(expected))
         assert actual == expected
         assert _sha256(actual) == _sha256(expected)

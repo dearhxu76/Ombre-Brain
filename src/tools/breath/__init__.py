@@ -30,12 +30,21 @@ breath 是「我睁眼看看自己记得什么」。这个文件根据参数把�
 from typing import Optional
 
 from .. import _runtime as rt
-from .._common import check_metadata_size, check_query_size
+from .._common import (
+    check_metadata_size,
+    check_query_size,
+)
 from .catalog import surface_catalog
 from .feel import surface_feels
 from .importance import surface_by_importance
 from .surface import surface_default
 from .search import surface_search
+
+
+async def _with_deletion_requests(body: str) -> str:
+    store = getattr(rt, "deletion_requests", None)
+    batch = await store.render_pending_batch() if store is not None else ""
+    return f"{batch}\n\n{body}" if batch and body else (batch or body)
 
 
 async def dispatch(
@@ -104,17 +113,18 @@ async def dispatch(
     max_results = min(max_results, 50)
     max_tokens = min(max_tokens, 20000)
     tag_filter = [t.strip() for t in tags.split(",") if t.strip()]
+    memory_max_tokens = max_tokens
 
     # --- catalog 目录模式：最先短路，0 LLM、只读元数据、每桶一行 ---
     # 开新窗省 token 的推荐姿势：先 breath(catalog=True) 看目录，
     # 再 breath(query=...) 精准拉取正文。
     if catalog:
         domain_filter = [d.strip() for d in domain.split(",") if d.strip()]
-        return await surface_catalog(
+        return await _with_deletion_requests(await surface_catalog(
             domain_filter=domain_filter or None,
             tag_filter=tag_filter,
             max_results=max_results,
-        )
+        ))
 
     # --- 解析 tags 过滤；feel/__feel__ 映射到 feel 通道 ---
     if any(t in ("feel", "__feel__") for t in tag_filter):
@@ -123,33 +133,33 @@ async def dispatch(
 
     # --- Feel 通道优先：即使无 query 也直接拉 feel ---
     if domain.strip().lower() == "feel":
-        return await surface_feels(max_tokens=max_tokens)
+        return await _with_deletion_requests(await surface_feels(max_tokens=memory_max_tokens))
 
     # --- importance_min 模式：跳过语义，按 importance 降序 ---
     if importance_min >= 1:
-        return await surface_by_importance(
+        return await _with_deletion_requests(await surface_by_importance(
             importance_min=importance_min,
-            max_tokens=max_tokens,
+            max_tokens=memory_max_tokens,
             tag_filter=tag_filter,
-        )
+        ))
 
     # --- 无 query：浮现模式 ---
     if not query or not query.strip():
-        return await surface_default(
+        return await _with_deletion_requests(await surface_default(
             max_results=max_results,
-            max_tokens=max_tokens,
+            max_tokens=memory_max_tokens,
             tag_filter=tag_filter,
-        )
+        ))
 
     # --- 有 query：检索模式 ---
-    return await surface_search(
+    return await _with_deletion_requests(await surface_search(
         query=query,
         max_results=max_results,
-        max_tokens=max_tokens,
+        max_tokens=memory_max_tokens,
         domain=domain,
         valence=valence,
         arousal=arousal,
         tag_filter=tag_filter,
         date_from=date_from,
         date_to=date_to,
-    )
+    ))

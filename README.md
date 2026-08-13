@@ -48,7 +48,7 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 - **边界是「时间里发生的事」，不是「你是谁」**。身份层交给官方记忆；OB 只管经历、情绪、承诺、感受。
 - **情感是坐标，不是标签**。每条记忆用 Russell 环形模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，而不是「开心 / 难过」这种离散桶。
 - **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。OB 的 MCP 工具、REST API 和 Dashboard 都不提供物理抹除；“删除”只会把 Markdown 移入 `archive/` 并从日常召回中隐藏。只有主机管理者绕过 OB、在文件系统中手动删除文件，才能真正抹去它。
-- **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24、高重要度（importance≥9）有配额——重要的东西必须稀缺，否则「重要」就失去意义。
+- **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24——重要的东西必须稀缺，否则「重要」就失去意义；`importance` 本身只是普通评分字段，不额外设配额。
 - **元数据不喂进算分**。「为什么记得」「主动遗忘」这类字段只描述「为什么 / 怎么对待」，绝不参与衰减打分——不把记忆变成一个可被优化的目标函数。
 - **feel 是痕迹，不是待办**。模型写下的第一人称感受，写下就留着它本来的形状，不该被「解决」。
 
@@ -66,9 +66,9 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 |---|---|
 | `breath` | 睁眼。**0 参数**，让权重最高、未解决且未标记 digested 的事浮现 + 置顶核心准则；每条正文后附一行简洁 Footprint。digested 只从默认/被动浮现隐藏，仍可按 query 找回。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
 | `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
-| `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
+| `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token；anchor 带 `⚓ [anchor]`）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
 | `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。 |
-| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
+| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
 | `source_read` | 凭精确桶 ID + 精确标题读取该桶的隐藏原文证据；默认只读该事件声明的非空行范围，不搜索、不联想，过长则显式分页。 |
 | `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
@@ -77,14 +77,16 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 | 工具 | 一句话 |
 |---|---|
-| `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要。「为什么搜不到 X」时第一个调它。 |
+| `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要；anchor 带 `⚓ [anchor]`。「为什么搜不到 X」时第一个调它。 |
 | `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
-| `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 不主动浮现但可被检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
+| `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 是带 `⚓ [anchor]` 显示标记的冷参考：不主动浮现但可被显式检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
 | `letter_write` / `letter_read` / `letter_lock_update` | 写信 / 读信 / 只修改锁状态。`lock_type` 支持 `none`、`timed`、`permanent`；锁拥有者可读全文并可改期或解锁，对方在解锁前只能看到不含标题与正文的必要元数据。 |
 
 Letter 时间锁是 Ombre-Brain 应用层的关系边界，不是磁盘加密。拥有 vault 文件系统、宿主机管理员权限或原始 Markdown 访问权限的人仍能读取原文；它不应被描述为管理员不可读的加密保险箱。旧 Letter 缺少锁字段时等同 `lock_type=none`，无需迁移。
 
 Dashboard 原有的 Letter 编辑继续保留：历史信、无锁信以及当前锁拥有者自己的锁信均可编辑原稿；对方尚未解锁的信不可读也不可编辑。正文编辑与锁状态管理使用同一 PATCH 路由，但必须分开请求，且两类操作都不会改写创建时快照的 `writer_name`。
+
+旧版历史 Letter 默认继续公开且不可补锁。Dashboard 可按单封信执行一次“转换为新版 Letter”：正文与原始元数据不变，只从现有 `AI_NAME` 补写实际关系名，并把锁控制权固定交给 AI；转换后由 AI 通过 `letter_lock_update` 管理锁，human 不获得锁权限。该转换不批量执行，也不根据旧 `author` 推断身份。
 | `I` | 自我认知：「我是什么」（本质 / 规律 / 立场 / 局限…）。**是沉淀物，不是日记**——写下的「我觉得……」先落成一条普通记忆（候选），会浮现也会衰减，每次 `dream` 都跟相关记忆摆在一起碰撞；被 3 次不同日期的 `dream` 见证后还站得住，才用 `I(promote="桶ID")` 升级成正式条目。正式条目不随普通 `breath` 浮现，每次对话开头自动附最近 3 条。 |
 
 ### 原文证据边界
@@ -876,6 +878,6 @@ MIT
 
 当前正式变量名：
 
-`OMBRE_COMPRESS_API_KEY`、`OMBRE_COMPRESS_BASE_URL`、`OMBRE_COMPRESS_MODEL`、`OMBRE_COMPRESS_FORMAT`、`OMBRE_COMPRESS_TIMEOUT_SECONDS`、`OMBRE_EMBED_API_KEY`、`OMBRE_EMBED_BASE_URL`、`OMBRE_EMBED_MODEL`、`OMBRE_EMBED_FORMAT`、`OMBRE_EMBED_TIMEOUT_SECONDS`、`OMBRE_EMBED_BACKEND`、`OMBRE_OLLAMA_URL`、`OMBRE_VAULT_DIR`、`OMBRE_MEDIA_DIR`、`OMBRE_MEDIA_MAX_BYTES`、`OMBRE_CONFIG_PATH`、`OMBRE_CODE_DIR`、`OMBRE_LOG_DIR`、`OMBRE_LOG_FILE`、`OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`、`OMBRE_TRANSPORT`、`OMBRE_PORT`、`OMBRE_BIND_HOST`、`OMBRE_BIND_ADDRESS`、`OMBRE_MCP_REQUIRE_AUTH`、`OMBRE_MCP_AUTH_MODE`、`OMBRE_MCP_TOKEN`、`OMBRE_ALLOW_INSECURE_MCP`、`OMBRE_DASHBOARD_PASSWORD`、`OMBRE_DASHBOARD_SESSION_DAYS`、`OMBRE_TRUSTED_PROXY_CIDRS`、`OMBRE_GITHUB_TOKEN`、`OMBRE_HOOK_URL`、`OMBRE_HOOK_TOKEN`、`OMBRE_HOOK_SKIP`、`OMBRE_HOOK_ALLOW_PUBLIC`、`OMBRE_ALLOW_CUSTOM_UPDATE_REPO`、`OMBRE_ALLOW_UNTRUSTED_MIRROR`、`OMBRE_UPDATE_ALLOW_PIP`、`OMBRE_FORCE_CODE_RESEED`、`AI_NAME`。
+`OMBRE_COMPRESS_API_KEY`、`OMBRE_COMPRESS_BASE_URL`、`OMBRE_COMPRESS_MODEL`、`OMBRE_COMPRESS_FORMAT`、`OMBRE_COMPRESS_TIMEOUT_SECONDS`、`OMBRE_EMBED_API_KEY`、`OMBRE_EMBED_BASE_URL`、`OMBRE_EMBED_MODEL`、`OMBRE_EMBED_FORMAT`、`OMBRE_EMBED_TIMEOUT_SECONDS`、`OMBRE_EMBED_BACKEND`、`OMBRE_OLLAMA_URL`、`OMBRE_VAULT_DIR`、`OMBRE_MEDIA_DIR`、`OMBRE_MEDIA_MAX_BYTES`、`OMBRE_CONFIG_PATH`、`OMBRE_CODE_DIR`、`OMBRE_LOG_DIR`、`OMBRE_LOG_FILE`、`OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`、`OMBRE_TRANSPORT`、`OMBRE_PORT`、`OMBRE_BIND_HOST`、`OMBRE_BIND_ADDRESS`、`OMBRE_MCP_REQUIRE_AUTH`、`OMBRE_MCP_AUTH_MODE`、`OMBRE_MCP_TOKEN`、`OMBRE_ALLOW_INSECURE_MCP`、`OMBRE_DASHBOARD_PASSWORD`、`OMBRE_SETUP_TOKEN`、`OMBRE_DASHBOARD_SESSION_DAYS`、`OMBRE_TRUSTED_PROXY_CIDRS`、`OMBRE_GITHUB_TOKEN`、`OMBRE_HOOK_URL`、`OMBRE_HOOK_TOKEN`、`OMBRE_HOOK_SKIP`、`OMBRE_HOOK_ALLOW_PUBLIC`、`OMBRE_ALLOW_CUSTOM_UPDATE_REPO`、`OMBRE_ALLOW_UNTRUSTED_MIRROR`、`OMBRE_UPDATE_ALLOW_PIP`、`OMBRE_FORCE_CODE_RESEED`、`AI_NAME`。
 
 永久兼容旧名：`OMBRE_API_KEY` → `OMBRE_COMPRESS_API_KEY`，`OMBRE_BASE_URL` → `OMBRE_COMPRESS_BASE_URL`，`PASSWORD` → `OMBRE_DASHBOARD_PASSWORD`，`OMBRE_BUCKETS_DIR` → `OMBRE_VAULT_DIR`。

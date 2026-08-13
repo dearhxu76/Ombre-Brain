@@ -1,6 +1,10 @@
+import ast
 import asyncio
 import json
+import shutil
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -285,86 +289,20 @@ async def test_kelivo_compatible_stateless_json_handshake_lists_all_tools():
                 assert all(isinstance(tool.get("inputSchema"), dict) for tool in tools)
 
 
-@pytest.mark.asyncio
-async def test_legacy_sse_official_client_lists_all_tools():
-    """Streamable HTTP 的兼容改动不能破坏旧版 SSE 发现路径。"""
+def test_legacy_sse_transport_is_rejected():
+    """2026-08-09 起 legacy SSE 传输下线：build_http_app 必须明确拒绝，不能悄悄放行。"""
 
-    import socket
-
-    import uvicorn
-    from mcp import ClientSession
-    from mcp.client.sse import sse_client
-
-    import server
-
-    app = build_http_app(
-        server.mcp,
-        "sse",
-        settings=HTTPRuntimeSettings(
-            auth_required=False,
-            max_request_bytes=DEFAULT_MAX_MCP_REQUEST_BYTES,
-        ),
-        token_validator=lambda *_args, **_kwargs: False,
-        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
-    )
-    requests = []
-
-    async def recording_app(scope, receive, send):
-        if scope["type"] == "http":
-            requests.append((scope["method"], scope["path"]))
-        await app(scope, receive, send)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    sock.listen()
-    port = sock.getsockname()[1]
-    uvicorn_server = uvicorn.Server(
-        uvicorn.Config(
-            recording_app,
-            log_level="warning",
-            lifespan="on",
-            timeout_graceful_shutdown=1,
+    with pytest.raises(ValueError, match="sse"):
+        build_http_app(
+            object(),
+            "sse",
+            settings=HTTPRuntimeSettings(
+                auth_required=False,
+                max_request_bytes=DEFAULT_MAX_MCP_REQUEST_BYTES,
+            ),
+            token_validator=lambda *_args, **_kwargs: False,
+            lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
         )
-    )
-    server_task = asyncio.create_task(uvicorn_server.serve(sockets=[sock]))
-
-    async def wait_until_started():
-        while not uvicorn_server.started:
-            if server_task.done():
-                await server_task
-            await asyncio.sleep(0.01)
-
-    try:
-        await asyncio.wait_for(wait_until_started(), timeout=10)
-        async with sse_client(
-            f"http://127.0.0.1:{port}/sse",
-            timeout=5,
-            sse_read_timeout=10,
-        ) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                initialized = await asyncio.wait_for(
-                    session.initialize(),
-                    timeout=10,
-                )
-                listed = await asyncio.wait_for(
-                    session.list_tools(),
-                    timeout=10,
-                )
-
-        assert initialized.protocolVersion
-        assert [tool.name for tool in listed.tools] == list(
-            EXPECTED_PUBLIC_MCP_TOOLS
-        )
-        assert ("GET", "/sse") in requests
-        assert any(
-            method == "POST" and path.rstrip("/") == "/messages"
-            for method, path in requests
-        )
-    finally:
-        uvicorn_server.should_exit = True
-        await asyncio.wait_for(server_task, timeout=10)
-        sock.close()
 
 
 @pytest.mark.asyncio
@@ -1088,13 +1026,9 @@ async def test_runtime_lifespan_composes_with_parent_lifespan():
     ]
 
 
-@pytest.mark.parametrize("transport", ["streamable-http", "sse"])
-def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transport):
+def test_build_http_app_uses_the_managed_stack():
     class FakeMCP:
         def streamable_http_app(self):
-            return Starlette()
-
-        def sse_app(self):
             return Starlette()
 
     lifecycle = RuntimeLifecycle(logger=RecordingLogger())
@@ -1106,7 +1040,7 @@ def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transpo
 
     app = build_http_app(
         FakeMCP(),
-        transport,
+        "streamable-http",
         settings=settings,
         token_validator=lambda *_args, **_kwargs: False,
         lifecycle=lifecycle,
@@ -1120,10 +1054,8 @@ def test_build_http_app_uses_same_managed_stack_for_both_http_transports(transpo
         "ManagementRequestBodyLimitMiddleware",
         "MCPAuthMiddleware",
         "NgrokHeaderMiddleware",
+        "MCPJSONAcceptShim",
     }
-    assert ("MCPJSONAcceptShim" in middleware_names) is (
-        transport == "streamable-http"
-    )
     csrf_middleware = next(
         item
         for item in app.user_middleware
@@ -1203,3 +1135,90 @@ def test_build_http_app_rejects_stdio_transport():
             token_validator=lambda *_args, **_kwargs: False,
             lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
         )
+
+
+def test_stdio_runtime_lifecycle_owns_embedding_outbox():
+    source_path = Path(__file__).resolve().parents[1] / "src" / "server.py"
+    module = ast.parse(source_path.read_text(encoding="utf-8"))
+
+    stdio_branch = None
+    for node in ast.walk(module):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+            continue
+        test = node.test
+        if (
+            isinstance(test.left, ast.Name)
+            and test.left.id == "transport"
+            and any(
+                isinstance(value, ast.Constant) and value.value == "stdio"
+                for value in test.comparators
+            )
+        ):
+            stdio_branch = node.body
+            break
+
+    assert stdio_branch is not None
+    lifecycle_calls = [
+        item
+        for statement in stdio_branch
+        for item in ast.walk(statement)
+        if isinstance(item, ast.Call)
+        and isinstance(item.func, ast.Name)
+        and item.func.id == "RuntimeLifecycle"
+    ]
+    assert len(lifecycle_calls) == 1
+
+    keywords = {keyword.arg: keyword.value for keyword in lifecycle_calls[0].keywords}
+    outbox = keywords.get("embedding_outbox")
+    assert isinstance(outbox, ast.Name)
+    assert outbox.id == "embedding_outbox"
+
+
+@pytest.mark.asyncio
+async def test_stdio_mcp_server_resets_existing_boot_marker_after_successful_handshake(
+    tmp_path,
+):
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+
+    runtime_root = tmp_path / "runtime"
+    shutil.copytree(Path(__file__).resolve().parents[1] / "src", runtime_root / "src")
+    shutil.copy(Path(__file__).resolve().parents[1] / "VERSION", runtime_root / "VERSION")
+
+    buckets_dir = tmp_path / "buckets"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        json.dumps(
+            {
+                "transport": "stdio",
+                "buckets_dir": str(buckets_dir),
+                "embedding": {"enabled": False},
+            }
+        ),
+        encoding="utf-8",
+    )
+    marker = runtime_root / ".boot_fails"
+    marker.write_text("1\n", encoding="utf-8")
+
+    server = StdioServerParameters(
+        command=sys.executable,
+        args=[str(runtime_root / "src" / "server.py")],
+        cwd=runtime_root,
+        env={
+            "OMBRE_CONFIG_PATH": str(config_path),
+            "OMBRE_BUCKETS_DIR": str(buckets_dir),
+            "OMBRE_LOG_DIR": str(tmp_path / "logs"),
+            "PYTHONPYCACHEPREFIX": str(tmp_path / "pycache"),
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONUTF8": "1",
+        },
+    )
+
+    async with stdio_client(server) as (read_stream, write_stream):
+        async with ClientSession(read_stream, write_stream) as session:
+            initialized = await session.initialize()
+            listed = await session.list_tools()
+
+    assert initialized.protocolVersion
+    assert [tool.name for tool in listed.tools] == list(EXPECTED_PUBLIC_MCP_TOOLS)
+    assert marker.read_text(encoding="utf-8") == "0"

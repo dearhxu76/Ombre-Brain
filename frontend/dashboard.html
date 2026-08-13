@@ -1832,6 +1832,112 @@
     transition: opacity 0.3s;
   }
   .self-overlay.show { opacity: 1; pointer-events: auto; }
+
+  /* 多人模式名称来自环境变量；极长名称只能省略，不能反向撑宽页头。 */
+  #owner-badge {
+    min-width: 0;
+    max-width: min(220px, 100%);
+  }
+  #owner-badge-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* PC 窄窗：页头分为信息、操作两行，避免统计与标题被挤成竖排。 */
+  @media (min-width: 769px) and (max-width: 1500px) {
+    .header {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        "title meta meta"
+        "search search actions";
+      align-items: center;
+      gap: 12px 16px;
+      padding: 20px 24px 16px;
+    }
+    .header h1 {
+      grid-area: title;
+      min-width: max-content;
+      white-space: nowrap;
+    }
+    .header-meta {
+      grid-area: meta;
+      min-width: 0;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .header .stats { white-space: nowrap; }
+    .search-bar {
+      grid-area: search;
+      width: 100%;
+      max-width: 720px;
+      min-width: 0;
+      margin-left: 0;
+    }
+    .search-bar input {
+      width: auto;
+      min-width: 0;
+      flex: 1;
+    }
+    .header-actions {
+      grid-area: actions;
+      margin-left: 0;
+      flex-shrink: 0;
+    }
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(0, 1fr));
+      margin: 12px 24px 8px;
+    }
+    .tab {
+      min-width: 0;
+      max-width: none;
+      padding: 9px 10px 7px;
+    }
+    .tab-spacer { display: none; }
+  }
+
+  /* 更窄的 PC 窗口将入口稳定排成 6 + 5，避免“关于”独占一行。 */
+  @media (min-width: 769px) and (max-width: 1100px) {
+    .tabs { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  }
+
+  /* 移动端覆盖必须位于主题层之后，确保紧凑尺寸不会被桌面主题反向覆盖。 */
+  @media (max-width: 768px) {
+    .header h1 {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .header .stats {
+      white-space: normal;
+      word-break: keep-all;
+    }
+    .header-actions button {
+      width: 36px !important;
+      min-width: 36px !important;
+      height: 32px !important;
+      padding: 0 !important;
+      gap: 3px !important;
+      justify-content: center;
+      font-size: 0 !important;
+    }
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin: 8px 12px;
+      padding: 6px 8px;
+      gap: 5px;
+    }
+    .tab {
+      min-width: 0;
+      max-width: none;
+      padding: 7px 10px 5px;
+    }
+    .tab-spacer { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -2349,6 +2455,16 @@
           </span>
           <!-- 热更新持久性提示（用户反馈 #1）：Docker 下如实说明「已持久化 / 重建后会失效」 -->
           <div id="ver-persist-note" style="display:none;margin-top:10px;font-size:12px;line-height:1.5;border-radius:8px;padding:9px 12px;"></div>
+          <!-- 依赖变化时是否自动 pip install（安全加固 #2 默认关闭；这里只是把已有的
+               config.update.allow_pip_install 暴露成可点的开关，不改默认值）。 -->
+          <div style="margin-top:10px;font-size:11px;color:var(--text-dim);line-height:1.6;">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);">
+              <input type="checkbox" id="update-allow-pip" onchange="toggleUpdateAllowPip(this.checked)" />
+              热更新遇到依赖变化时自动安装（<code>pip install</code>）
+            </label>
+            <div style="margin-top:2px;">默认关闭：自动装依赖会把"谁能点热更新"放大成任意 PyPI 包的执行面。只在你信任更新来源、又不想每次依赖变化都手动重建镜像时打开；关闭时遇到依赖变化会直接拒绝更新，不改动任何文件。</div>
+            <div id="update-allow-pip-msg" style="min-height:14px;margin-top:2px;"></div>
+          </div>
         </div>
 
         <!-- 更新进度日志 -->
@@ -2915,14 +3031,12 @@
         <div style="font-weight:600;font-size:13px;margin-bottom:8px;">传输模式 · MCP Transport</div>
         <div id="transport-btns" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <button type="button" class="transport-btn" data-transport="streamable-http" onclick="switchTransport('streamable-http')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">Streamable HTTP</button>
-          <button type="button" class="transport-btn" data-transport="sse" onclick="switchTransport('sse')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">Legacy SSE</button>
           <button type="button" class="transport-btn" data-transport="stdio" onclick="switchTransport('stdio')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">stdio</button>
           <span id="transport-msg" style="margin-left:6px;font-size:11px;"></span>
         </div>
         <div style="margin-top:8px;font-size:11px;color:var(--text-light);line-height:1.7;">
           切换会写入 config.yaml + .env 并<b>自动重启服务</b>（约 10-30 秒）后生效。
           <b>Streamable HTTP</b>：Claude.ai 网页版 / Claude Code 远程（推荐默认）。
-          <b>Legacy SSE</b>：旧版 SSE 客户端兼容。
           <b style="color:var(--negative);">stdio</b>：⚠️ 仅本地 stdin/stdout MCP，切换后 <b>Dashboard 与所有 HTTP 服务会消失，且无法再从网页切回</b>（需在服务器改 config.yaml / 环境变量恢复）。
         </div>
       </div>
@@ -3179,6 +3293,10 @@
     <!-- Setup form -->
     <div id="auth-setup-form" style="display:none;">
       <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">首次使用，请设置访问密码 / First time here — please set an access password</p>
+      <div id="auth-setup-remote-warning" style="display:none;text-align:left;font-size:12px;line-height:1.7;color:var(--warning,#d29922);background:rgba(210,153,34,0.12);border:1px solid rgba(210,153,34,0.4);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+        ⚠️ 检测到你不是从本机（localhost/127.0.0.1）访问的——首次设置密码的接口只信任本机连接，这里填了提交大概率会被服务端拒绝。<br>
+        请改为 SSH 登录服务器，在 <code>.env</code> 里设置 <code>OMBRE_DASHBOARD_PASSWORD</code> 后重启服务；或设置 <code>OMBRE_SETUP_TOKEN</code> 后用 <code>curl</code> 带 <code>X-Ombre-Setup-Token</code> 头远程调用一次 <code>/auth/setup</code>。
+      </div>
       <input type="password" id="auth-setup-pwd" placeholder="设置密码（至少6位）/ Password (6+ chars)" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:10px;" />
       <input type="password" id="auth-setup-pwd2" placeholder="确认密码 / Confirm password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:12px;" onkeydown="if(event.key==='Enter')doSetup()" />
       <details style="margin-bottom:16px;text-align:left;">
@@ -3377,6 +3495,15 @@ async function finishDashboardAuthentication() {
   return true;
 }
 
+// 只是浏览器地址栏的启发式判断，不是权威校验——服务端 auth.py 的
+// _setup_request_allowed 才是真正说了算的那道门（还要求没有代理转发头）。
+// 这里命中不了本机也提前提示，省得用户填完密码提交才被拒绝。
+function _isLikelyLoopbackHost() {
+  var h = (window.location.hostname || '').toLowerCase();
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
 async function checkAuth() {
   var requestedGeneration = _dashboardAuthGeneration;
   try {
@@ -3390,6 +3517,8 @@ async function checkAuth() {
       document.getElementById('auth-login-form').style.display = 'none';
       document.getElementById('auth-recovery-form').style.display = 'none';
       document.getElementById('auth-overlay').style.display = 'flex';
+      var remoteWarn = document.getElementById('auth-setup-remote-warning');
+      if (remoteWarn) remoteWarn.style.display = _isLikelyLoopbackHost() ? 'none' : 'block';
       return false;
     } else if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
@@ -3421,6 +3550,11 @@ async function readAuthFailure(resp, fallback) {
     if (resp.status === 403 && error === 'Cross-origin request rejected') {
       return '反向代理来源校验失败（HTTP 403）。请让 nginx 保留 Host、X-Forwarded-Host、X-Forwarded-Proto，并配置 OMBRE_TRUSTED_PROXY_CIDRS。';
     }
+    if (resp.status === 403 && error.indexOf('local-only') !== -1) {
+      return '首次设置密码只信任本机连接（HTTP 403）。请 SSH 登录服务器，在 .env 里设置 '
+        + 'OMBRE_DASHBOARD_PASSWORD 后重启服务；或设置 OMBRE_SETUP_TOKEN 后用 curl 带 '
+        + 'X-Ombre-Setup-Token 头远程调用一次 /auth/setup。';
+    }
     return error || fallback || ('登录请求失败（HTTP ' + resp.status + '）');
   } catch (_) {
     return '登录请求失败（HTTP ' + resp.status + '）：反向代理未返回 OB 的 JSON 响应，请检查 nginx 是否完整转发 /auth/*。';
@@ -3434,8 +3568,7 @@ async function doSetup() {
   if (p1 !== p2) return showAuthError('两次密码不一致');
   const resp = await fetch('/auth/setup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: p1}) });
   if (!resp.ok) {
-    const d = await resp.json().catch(() => ({}));
-    return showAuthError(d.error || '设置失败');
+    return showAuthError(await readAuthFailure(resp, '设置失败'));
   }
   // 可选：同时保存安全问题
   const q = (document.getElementById('auth-setup-q')?.value || '').trim();
@@ -4484,12 +4617,24 @@ function selectAllCurrentPage(checked) {
   syncBucketSelectionUi();
 }
 
+function isKnownErasableTestBucket(id) {
+  var bucket = (allBuckets || []).find(function(item) { return item.id === id; });
+  return !!(bucket && bucket.erasable_test_data);
+}
+
 async function runBucketBatch(action) {
   var ids = Array.from(selectedBucketIds);
   if (!ids.length) return alert('请先选择记忆桶。');
   var labels = {forget:'主动遗忘', resolve:'沉底', archive:'归档'};
   if (!confirm('确认对 ' + ids.length + ' 条记忆执行“' + labels[action] + '”？')) return;
-  var res = await authFetch('/api/buckets/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids:ids, action:action})});
+  var reason = '';
+  var allKnownTests = ids.every(isKnownErasableTestBucket);
+  if (action === 'archive' && !allKnownTests) {
+    reason = prompt('Why should these memories be archived? A reason is required.');
+    if (reason === null) return;
+    if (!reason.trim()) return alert('Archive reason is required.');
+  }
+  var res = await authFetch('/api/buckets/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids:ids, action:action, reason:reason})});
   if (!res) return;
   var data = await readJsonSafe(res);
   if (!res.ok) return alert(data.error || '批量操作失败');
@@ -4780,7 +4925,8 @@ function _paintBuckets() {
     // iter 1.8: dont_surface = 主动遗忘（仍在磁盘） / first_of_kind = 首次出现的标签组合
     // 图标：feel→计算表情、letter→信封、pinned→可发光的钉、其余沿用原逻辑
     var iconCls = 'icon', iconHtml;
-    if (b.dont_surface)        iconHtml = '<i data-lucide="eye-off"></i>';
+    if (b.letter_locked)       iconHtml = '<i data-lucide="lock-keyhole"></i>';
+    else if (b.dont_surface)   iconHtml = '<i data-lucide="eye-off"></i>';
     else if (b.pinned)       { iconHtml = '<i data-lucide="pin"></i>'; iconCls = 'icon pin-ic'; }
     else if (b.type === 'feel')   iconHtml = feelFace(b.valence, b.arousal);
     else if (b.type === 'letter') iconHtml = '<i data-lucide="mail"></i>';
@@ -4906,6 +5052,25 @@ async function showDetail(id) {
     var meta = b.metadata || {};
     // content 是可无损写回的原始 Markdown；display_content 仅供详情展示。
     var displayContent = typeof b.display_content === 'string' ? b.display_content : (b.content || '');
+    if (b.letter_locked) {
+      panel.classList.add('letter-mode');
+      panel.classList.remove('anchor-mode');
+      var lockUntil = meta.lock_type === 'timed' && meta.unlock_date
+        ? '<div class="field"><label>解锁时间 / Unlock</label>' + esc(String(meta.unlock_date).replace('T', ' ').slice(0, 19)) + '</div>'
+        : '';
+      content.innerHTML =
+        '<h2><i data-lucide="lock-keyhole" style="width:18px;height:18px;vertical-align:-3px;"></i> ' + esc(meta.name || '一封上锁的信') + '</h2>' +
+        '<div class="detail-meta letter-lock-meta">' +
+          '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
+          '<div class="field"><label>写信人 / Writer</label>' + esc(meta.writer_name || meta.author || '—') + '</div>' +
+          '<div class="field"><label>日期 / Date</label>' + esc(meta.letter_date || meta.created || '—') + '</div>' +
+          '<div class="field"><label>锁类型 / Lock</label>' + esc(meta.lock_type || '—') + '</div>' +
+          lockUntil +
+        '</div>' +
+        '<div class="detail-content">' + esc(displayContent || '这封信尚未向你开放。') + '</div>';
+      if (window.lucide) lucide.createIcons();
+      return true;
+    }
     var safeValence = safeNumber(meta.valence, 0.5, 0, 1);
     var safeArousal = safeNumber(meta.arousal, 0.3, 0, 1);
     var safeModelValence = meta.model_valence == null
@@ -4926,6 +5091,13 @@ async function showDetail(id) {
     var triggerHtml = meta.triggered_by ? ('<div class="field"><label>源 bucket</label><a href="#" data-bucket-id="' + escAttr(meta.triggered_by) + '" onclick="showDetail(this.dataset.bucketId);return false" style="color:var(--accent);text-decoration:underline;font-size:11px;">' + esc(meta.triggered_by) + ' →</a></div>') : '';
     // iter 1.9 D2: 反向链——这条触发了哪些 feel
     var triggeredFeelsHtml = '';
+    var deletionRequest = b.deletion_request || null;
+    var deletionRequestHtml = '';
+    if (deletionRequest && deletionRequest.status === 'pending') {
+      deletionRequestHtml = '<div style="margin:10px 0;padding:10px 14px;border-left:3px solid var(--negative);background:var(--surface-solid);">删除申请待 AI 决定 / Deletion pending: ' + esc(deletionRequest.human_reason || '') + ' <button data-bucket-id="' + escAttr(id) + '" onclick="withdrawBucketDeletion(this.dataset.bucketId)" class="icon-btn">撤回 / Withdraw</button></div>';
+    } else if (deletionRequest && deletionRequest.status === 'rejected') {
+      deletionRequestHtml = '<div style="margin:10px 0;padding:10px 14px;border-left:3px solid var(--accent);background:var(--surface-solid);">删除申请被拒绝 / Rejected' + (deletionRequest.ai_reason ? ': ' + esc(deletionRequest.ai_reason) : '') + '</div>';
+    }
     if (b.triggered_feels && b.triggered_feels.length) {
       triggeredFeelsHtml = '<div style="margin:14px 0;padding:10px 14px;border-left:3px solid var(--accent);background:var(--surface-solid);">' +
         '<div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">这条触发了 ' + b.triggered_feels.length + ' 条 feel：</div>' +
@@ -4961,6 +5133,7 @@ async function showDetail(id) {
         triggerHtml +
       '</div>' +
       triggeredFeelsHtml +
+      deletionRequestHtml +
       '<div class="detail-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketPin(this.dataset.bucketId)" class="icon-btn">' + (meta.pinned ? '<i data-lucide="pin-off"></i> 取消钉选' : '<i data-lucide="pin"></i> 钉选') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketAnchor(this.dataset.bucketId)" class="icon-btn" title="anchor = 坐标系，不主动浮现，硬上限 24">' + (meta.anchor ? '<i data-lucide="anchor"></i> 释放 anchor' : '<i data-lucide="anchor"></i> 设为 anchor') + '</button>' +
@@ -5089,8 +5262,14 @@ async function bucketResolve(id) {
 
 async function bucketArchive(id) {
   if (!confirm('确认归档此桶？归档后将从浮现/搜索中隐藏，但文件仍保留在 archive/ 目录。\n\nArchive this bucket? It will be hidden from surfacing/search, but the file stays in archive/.')) return;
+  var reason = '';
+  if (!isKnownErasableTestBucket(id)) {
+    reason = prompt('Why should this memory be archived? A reason is required.');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('Archive reason is required.'); return; }
+  }
   try {
-    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/archive', { method: 'POST' });
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/archive', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({reason: reason}) });
     if (!res.ok) throw new Error(await res.text());
     closeDetail();
     loadBuckets();
@@ -5098,17 +5277,25 @@ async function bucketArchive(id) {
 }
 
 async function bucketDelete(id) {
-  if (!confirm('这会把此记忆桶移入删除档案，并从日常界面隐藏；文件仍保留在 archive/ 中。继续？\n\nThis moves the bucket to the delete archive and hides it from everyday views; the file stays in archive/. Continue?')) return;
+  var reason = '';
+  if (!isKnownErasableTestBucket(id)) {
+    reason = prompt('为什么要删除这条记忆？必须填写理由。 / Why should this memory be deleted?');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('必须填写删除理由。 / Deletion reason is required.'); return; }
+  }
   try {
-    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE' });
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({reason: reason}) });
     if (!res.ok) throw new Error(await res.text());
-    closeDetail();
-    // 「放下」：让这条记忆轻轻消散，而不是直接消失
-    var sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
-    var row = document.querySelector('.bucket-row[data-id="' + sel + '"]');
-    if (row) { row.classList.add('dissolving'); setTimeout(loadBuckets, 600); }
-    else { loadBuckets(); }
+    await showDetail(id); loadBuckets();
   } catch (e) { alert('删除失败: ' + e.message); }
+}
+
+async function withdrawBucketDeletion(id) {
+  try {
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/deletion-request/withdraw', {method:'POST'});
+    if (!res.ok) throw new Error(await res.text());
+    await showDetail(id); loadBuckets();
+  } catch (e) { alert('撤回失败 / Withdrawal failed: ' + e.message); }
 }
 
 function closeDetail() {
@@ -7538,6 +7725,8 @@ loadVersionBadge();
     }
 
     var info = await loadDeployInfo();
+    var allowPipBox = document.getElementById('update-allow-pip');
+    if (allowPipBox) allowPipBox.checked = !!info.update_allow_pip_install;
     var deployEl = document.getElementById('ver-deploy-info');
     if (deployEl) {
       deployEl.textContent = [
@@ -7589,6 +7778,33 @@ loadVersionBadge();
     el.style.display = '';
   }
 
+  window.toggleUpdateAllowPip = async function(checked) {
+    var box = document.getElementById('update-allow-pip');
+    var msg = document.getElementById('update-allow-pip-msg');
+    if (msg) { msg.style.color = 'var(--text-dim)'; msg.textContent = '保存中…'; }
+    try {
+      var r = await authFetch('/api/update-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allow_pip_install: checked }),
+      });
+      var d = r ? await r.json() : {};
+      if (d.ok) {
+        if (_deployInfo) _deployInfo.update_allow_pip_install = d.allow_pip_install;
+        if (msg) {
+          msg.style.color = 'var(--positive)';
+          msg.textContent = d.allow_pip_install ? '已开启，立即生效，无需重启。' : '已关闭。';
+        }
+      } else {
+        if (box) box.checked = !checked;
+        if (msg) { msg.style.color = 'var(--negative)'; msg.textContent = d.error || '保存失败'; }
+      }
+    } catch (e) {
+      if (box) box.checked = !checked;
+      if (msg) { msg.style.color = 'var(--negative)'; msg.textContent = e.message; }
+    }
+  };
+
   window.doHotUpdate = async function() {
     var btn = document.getElementById('btn-hot-update');
     var logWrap = document.getElementById('ver-update-log');
@@ -7608,7 +7824,8 @@ loadVersionBadge();
     if (logBox)  logBox.textContent = '';
     if (doneEl)  doneEl.style.display = 'none';
 
-    var log = function(line) { if (logBox) logBox.textContent += line + '\n'; };
+    var baseLog = '';
+    var log = function(line) { baseLog += line + '\n'; if (logBox) logBox.textContent = baseLog; };
 
     try {
       // 热更新不是可重试写操作，不能走会对瞬时 502/503/504 自动重试的
@@ -7659,15 +7876,19 @@ loadVersionBadge();
       }
 
       if (restarting) {
-        // 轮询 /api/version 直到服务恢复
+        // 轮询 /api/version 直到服务恢复。等待提示原地刷新省略号（1~3 个循环），
+        // 不再每次追加新行——之前每 2 秒挂一行「等待服务恢复…」，60 秒内能刷出
+        // 30 行，日志框疯狂向下滚动，体验很差（用户反馈：卡在这一步"很掉san"）。
         var newVer = null;
+        var dotCount = 0;
         for (var i = 0; i < 30; i++) {
           await new Promise(function(res) { setTimeout(res, 2000); });
           try {
             var vr = await fetch(BASE + '/api/version');
             if (vr.ok) { var vd = await vr.json(); newVer = vd.version; break; }
           } catch(_) {}
-          log('等待服务恢复…');
+          dotCount = (dotCount % 3) + 1;
+          if (logBox) logBox.textContent = baseLog + '等待服务恢复' + '.'.repeat(dotCount);
         }
         if (newVer) {
           log('服务已恢复，新版本：v' + newVer);
@@ -8193,7 +8414,8 @@ async function loadImportResults(options) {
         </div>
         <p style="font-size:13px;margin:6px 0;white-space:pre-wrap;">${esc(b.content)}</p>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">${esc((b.tags||[]).map(t=>'#'+t).join(' '))}</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${b.letter_item ? '<div style="font-size:12px;color:var(--text-dim);">请在「信」页管理 / Manage in Letters</div>' : ''}
+        <div style="display:${b.letter_item ? 'none' : 'flex'};gap:8px;flex-wrap:wrap;">
           <button data-bucket-id="${escAttr(b.id)}" onclick="openImportedBucketEditor(this.dataset.bucketId)" class="icon-btn" title="编辑完整记忆 / Edit full memory"><svg class="icon" aria-hidden="true"><use href="#i-edit"></use></svg> 编辑</button>
           <button data-bucket-id="${escAttr(b.id)}" onclick="reviewAction(this.dataset.bucketId,'pin')" class="icon-btn" title="固定为永久记忆"><i data-lucide="pin"></i> 固定</button>
           <button data-bucket-id="${escAttr(b.id)}" onclick="reviewAction(this.dataset.bucketId,'important')" class="icon-btn" title="标为重要"><i data-lucide="star"></i> 重要</button>
@@ -8252,9 +8474,15 @@ async function detectPatterns() {
 
 async function reviewAction(bid, action) {
   try {
+    var reason = '';
+    if (action === 'delete') {
+      reason = prompt('为什么要删除这条记忆？必须填写理由。 / Why should this memory be deleted?');
+      if (reason === null) return;
+      if (!reason.trim()) throw new Error('Deletion reason is required.');
+    }
     const response = await fetch(BASE + '/api/import/review', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ decisions: [{ bucket_id: bid, action }] })
+      body: JSON.stringify({ decisions: [{ bucket_id: bid, action, reason }] })
     });
     const result = await readJsonSafe(response);
     if (!response.ok || !result || result.applied !== 1 || result.errors) {
@@ -9302,11 +9530,14 @@ function _renderLetter(l) {
       <span style="color:${accentColor};font-weight:600;">${esc(who)}</span><span>${esc(l.date || '')}</span>
     </div>
     <div style="font-size:11px;color:${l.locked ? 'var(--accent)' : 'var(--text-dim)'};margin-bottom:8px;">${lockLabel}</div>
+    ${l.deletion_request && l.deletion_request.status === 'pending' ? `<div style="font-size:12px;color:var(--negative);margin-bottom:8px;">删除申请待决定 / Deletion pending: ${esc(l.deletion_request.human_reason || '')}</div>` : ''}
+    ${l.deletion_request && l.deletion_request.status === 'rejected' ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;">删除申请被拒绝 / Rejected${l.deletion_request.ai_reason ? ': ' + esc(l.deletion_request.ai_reason) : ''}</div>` : ''}
     ${l.locked ? '<div style="font-size:13px;color:var(--text-dim);padding:10px 0;">这封信尚未向你开放。</div>' : `${l.title ? `<div style="font-family:'Cormorant Garamond', serif;font-size:17px;font-weight:600;margin-bottom:8px;color:var(--text);">${esc(l.title)}</div>` : ''}<div style="white-space:pre-wrap;font-size:14px;line-height:1.75;color:var(--text);">${esc(l.content || '')}</div>`}
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;font-size:11px;">
       ${!l.locked ? `<button data-letter-id="${escAttr(l.id)}" onclick="editLetter(this.dataset.letterId)" title="编辑" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="pencil" style="width:13px;height:13px;"></i></button>` : ''}
       ${l.lock_owner ? `<button data-letter-id="${escAttr(l.id)}" onclick="manageLetterLock(this.dataset.letterId)" title="修改锁状态" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="lock-keyhole" style="width:13px;height:13px;"></i> 锁</button>` : ''}
-      <button data-letter-id="${escAttr(l.id)}" onclick="deleteLetter(this.dataset.letterId)" title="删除" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--accent);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="trash-2" style="width:13px;height:13px;"></i></button>
+      ${l.lock_upgrade_available ? `<button data-letter-id="${escAttr(l.id)}" onclick="convertLegacyLetter(this.dataset.letterId)" title="转换为 AI 可管理锁的新格式" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="refresh-cw" style="width:13px;height:13px;"></i> 转换</button>` : ''}
+      ${l.deletion_request && l.deletion_request.status === 'pending' ? `<button data-letter-id="${escAttr(l.id)}" onclick="withdrawLetterDeletion(this.dataset.letterId)" title="撤回删除申请">撤回 / Withdraw</button>` : `<button data-letter-id="${escAttr(l.id)}" onclick="deleteLetter(this.dataset.letterId)" title="删除" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--accent);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="trash-2" style="width:13px;height:13px;"></i></button>`}
     </div>
   </article>`;
 }
@@ -9412,14 +9643,23 @@ async function manageLetterLock(id) {
 }
 
 async function deleteLetter(id) {
-  if (!confirm('这会把这封信移入删除档案；文件仍保留在 archive/ 中。继续？\n\nThis moves the letter to the delete archive; the file stays in archive/. Continue?')) return;
-  if (!confirm('再次确认：这不是物理抹除。 / Confirm again: this is not a physical erase.')) return;
+  const reason = prompt('为什么要删除这封信？必须填写理由。 / Why should this letter be deleted?');
+  if (reason === null) return;
+  if (!reason.trim()) { alert('必须填写删除理由。 / Deletion reason is required.'); return; }
   try {
-    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE' });
+    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({reason}) });
     const d = await r.json();
-    if (d.ok) { alert('已删除到档案 / Moved to archive'); loadLetters(); }
+    if (d.ok) { alert(d.deleted ? '已移入档案 / Moved to archive' : '删除申请已提交 / Deletion request submitted'); loadLetters(); }
     else { alert(d.error || '删除失败'); }
   } catch (e) { alert(e.message); }
+}
+
+async function withdrawLetterDeletion(id) {
+  try {
+    const r = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/deletion-request/withdraw', {method:'POST'});
+    if (!r.ok) throw new Error(await r.text());
+    loadLetters();
+  } catch (e) { alert('撤回失败 / Withdrawal failed: ' + e.message); }
 }
 
 // ── E/F 级错误自动弹窗 ────────────────────────────────────────
@@ -9494,6 +9734,38 @@ function refreshAuthenticatedActiveView() {
   if (!target) target = document.querySelector('.tab.active');
   if (target) return activateDashboardTab(target);
   return Promise.resolve([]);
+}
+
+async function convertLegacyLetter(id) {
+  const l = _lettersCache.find(x => x.id === id);
+  if (!l || !l.lock_upgrade_available) { alert('这封信不需要转换 / Conversion unavailable'); return; }
+  if (!confirm('转换后，这封历史 Letter 的锁控制权将永久交给当前 AI。\n\n正文、标题和创建时间不会改变；当前仍保持公开。确认继续？')) return;
+  await _submitConvertLegacyLetter(id, '');
+}
+
+// AI_NAME 未配置时后端会拒绝转换（需要一个「实际关系名」才能确定锁的归属，
+// 见 web/letters.py 的 convert_to_lockable 分支）。这里不改那道检查，只是让
+// 用户能当场填一个名字重试——只用于这一次转换请求，不写入全局配置。
+async function _submitConvertLegacyLetter(id, aiName) {
+  try {
+    const body = {convert_to_lockable: true};
+    if (aiName) body.ai_name = aiName;
+    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id), {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.ok) { alert('已转换为新版 Letter，锁控制权已交给当前 AI。'); loadLetters(); return; }
+    if (!aiName && r.status === 400 && (d.error || '').indexOf('无法转换历史 Letter') === 0) {
+      const typed = (prompt(
+        '当前未配置 AI_NAME，无法确定这封信锁的实际归属名。\n\n'
+        + '请输入这次转换要用的实际关系名（仅用于这一次转换，不会修改全局配置）：'
+      ) || '').trim();
+      if (typed) { await _submitConvertLegacyLetter(id, typed); return; }
+      return;
+    }
+    alert(d.error || '转换失败');
+  } catch (e) { alert(e.message); }
 }
 
 function toggleLetterUnlockInput() {

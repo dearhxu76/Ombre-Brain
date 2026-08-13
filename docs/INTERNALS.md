@@ -138,13 +138,13 @@ Ombre-Brain/
 src/tools/
 ├── _runtime.py    # 依赖注入容器：config / bucket_mgr / dehydrator / decay_engine /
 │                #   embedding_engine / import_engine / logger / fire_webhook / mark_op
-├── _common.py     # 多个工具共享的 helper：内容限额/pinned 配额/check_duplicate_for/
+├── _common.py     # 多个工具共享的 helper：内容限额/pinned/protected 配额/check_duplicate_for/
 │                #   check_plan_resolution/merge_or_create
 ├── breath/        # feel/importance/surface/search 四分支，__init__.py 转发
 ├── hold/          # core/feel/pinned 三分支，__init__.py 统一入口与参数校验
 ├── grow/          # core/shortpath（短内容快路径在 shortpath，raw_merge=True）
 ├── dream/         # candidates/hints/output 三阶段 + __init__ 编排
-├── trace/         # core（metadata/resolved/pinned/delete/content 替换/计划状态等全在这）
+├── trace/         # core（metadata/resolved/pinned/protected/delete/content 替换/计划状态等全在这）
 ├── anchor/        # core：anchor_set / anchor_release / pulse
 ├── plan/          # core：plan_create / letter_write / letter_lock_update / letter_read
 └── i/             # core：自我认知的候选写入 / 升级 / 读取 + 见证计数（dispatch=i_core）
@@ -284,8 +284,8 @@ feel 桶自身：
 
 1. **Feel 通道**（`domain="feel"` 或 `tags` 含 `"feel"`/`"__feel__"`，仅 `breath_advanced`）：直接拉所有 `type==feel` 桶，按 `created` 倒序展示原文，按 `surfacing.feel_max_tokens`（默认 6000）做 token 预算；**超出预算的旧 feel 折叠为 60 字符单行摘要**，并在末尾追加 `更早的 feel 摘要（N 条，已折叠）` 段。**不排除 anchor 桶**（设计：feel 通道只看 type=feel）。
 2. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
-3. **浮现模式**（无 `query`；`breath()` 固定走这里）：钉选桶始终展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 桶**（设计：anchor 是坐标系，不该随机冒泡干扰日常浮现；这是浮现模式独有的过滤）。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
-4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent 仍可被检索命中（不过滤），命中后加 📌 前缀** → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。
+3. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
+4. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
 (实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；`max_tokens` 上限 20000，`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
@@ -293,7 +293,7 @@ feel 桶自身：
 
 `FootprintSnapshot` 从兼容路径 `_ledger/events.jsonl` 读取 append-only 事件镜像并压缩展示；Markdown 正文仍是当前运行时的内容真源，Footprint 不复制正文，也不把 Ledger 提升为新的真源。旧存储名 `LedgerMirror` 保留用于兼容，面向模型的产品概念统一称为 Footprint。
 
-恢复是对归档状态的显式逆操作：`trace(bucket_id="...", restore=True)` 必须单独调用。`BucketManager.restore_archived()` 根据创建足迹恢复原 bucket type，清除 tombstone/deleted_at 等归档标记，把 Markdown 移回对应活跃目录，重建正文与 meaning 派生索引，并追加 `TraceRestored`。普通查询、无参 breath 和 Footprint 展示均没有恢复权限。
+恢复是对归档状态的显式逆操作：`trace(bucket_id="...", restore=True)` 必须单独调用。`BucketManager.restore_archived()` 根据创建足迹恢复原 bucket type，清除 tombstone/deleted_at 等归档标记，把 Markdown 移回对应活跃目录，重建正文与 meaning 派生索引，并追加 `TraceRestored`。归档期间会保留历史 pinned 标记，但恢复提交会原子清除它，避免记忆静默重新占用 pinned 配额；importance 本身不设硬配额，恢复后原样保留。历史档案若异常同时带有 protected 与 anchor，普通恢复会拒绝；调用 `trace(bucket_id="...", restore=True, protected=0, importance=1..10)` 可在同一事务中保留 anchor、解除保护并恢复。普通查询、无参 breath 和 Footprint 展示均没有恢复权限。
 
 ### 3.2 `hold` — 存储单条记忆
 
@@ -310,11 +310,12 @@ feel 桶自身：
 
 ### 3.3 `grow` — 日记拆分归档
 
-签名：`grow(content="", items=None)`
+签名：`grow(content="", items=None, test_data=False)`
 
-- 短内容（< 30 字符）走快速路径：`analyze()` + `_merge_or_create()`，跳过 `digest()` 节省一次 API。
+- 短内容（< 30 字符）走快速路径：`analyze(include_why=True)` + `_merge_or_create()`，跳过 `digest()` 节省一次 API。有效的候选 `why_remembered` 在首次新建时直接保存；后续合并仍只补旧空值。普通 `hold` 和 `items` 补元数据继续调用默认 `analyze()`，不会无故要求模型生成理由。
 - 正常路径：`dehydrator.digest()` 拆为 2~6 条 → 每条独立走 `_merge_or_create()`，单条失败 try/except 隔离，标 `⚠️条目名`。
-- `items=[...]` 模式表示调用方已经拆好最终正文。对象条目可显式给出 `title/content/tags/importance/domain/valence/arousal/source_ranges`，显式字段优先于自动打标。若同时传 `content`，它会作为整批共享的不可变原文证据保存一次；每个桶以 1-based 闭区间 `source_ranges` 指向自己的片段。
+- `items=[...]` 模式表示调用方已经拆好最终正文。对象条目可显式给出 `title/content/tags/importance/domain/valence/arousal/why_remembered/source_ranges`，显式字段优先于自动打标。`why_remembered` 必须是不超过 500 字符的字符串，首次新建可直接保存。若同时传 `content`，它会作为整批共享的不可变原文证据保存一次；每个桶以 1-based 闭区间 `source_ranges` 指向自己的片段。
+- `content` 自动模式会为每条产生候选 `why_remembered`：长内容由 digest 逐条生成，短内容由仅该路径开启的 `analyze(include_why=True)` 生成。两者首次新建都会保存合法非空理由；后续 `grow` 命中同一具体事件并合并时，仅在旧桶该字段为空时原子补入。旧值永不被 grow 自动覆盖，空值或非法模型输出也不会阻断正文入库或清除旧值。
 - 末尾异步触发 `_check_plan_resolution()`。
 
 返回示例：`3条|新2合1\n📝体检结果\n📌朋友聚餐\n📎近期焦虑情绪`。
@@ -332,12 +333,21 @@ feel 桶自身：
 
 ### 3.4 `trace` — 修改/删除
 
-签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="", meaning_append="", meaning_replace=None, media_append=None, media_replace=None, hard_delete=False, delete_reason="", old_str="", new_str=None)`
+签名：`trace(bucket_id, name="", domain="", valence=-1, arousal=-1, importance=-1, tags="", resolved=-1, pinned=-1, protected=-1, digested=-1, content="", delete=False, status="", weight=-1, dont_surface=-1, why_remembered="", meaning_append="", meaning_replace=None, media_append=None, media_replace=None, hard_delete=False, delete_reason="", restore=False, old_str="", new_str=None)`
 
 - `delete=True` → `bucket_mgr.delete()`：写入 `deleted_at` 并将 Markdown 移入 `archive/`；只清理可重建的 embedding 索引，不抹除记忆文件。
 - `hard_delete=True` → 仅当桶在创建时带有 `provenance.kind=test` 与 `erasable=true` 才物理删除；真实记忆、后补字段及普通 Dashboard 路径均不得越过此边界。Dashboard 普通模式支持多选/当前筛选全选的沉底、主动遗忘和归档，开发者模式才显示测试桶永久删除入口。
 - 其它字段：仅收集传入的（用 `-1`/空串作为「未传」哨兵）批量更新 frontmatter。
 - `pinned=1` 自动锁 importance=10 + 触发 `_move_bucket(permanent_dir)`。
+- `protected=1` 表示「防衰减、不主动浮现」，与 `pinned=True` 互斥，单桶不能同时为 True；不注入
+  `breath()`、dream 的 recent/core/I 候选碰撞/active plan/feel/提示/灵感候选，或 `/breath-hook`
+  的主池与 Letter/I 附加池；只在显式 search/catalog
+  中可见并标为 `🛡️ [受保护记忆]`。解除最后一层 pinned/protected
+  保护时，必须在同次调用传 `protected=0, importance=1..10`，避免解锁后
+  仍无意保留 importance=10。
+  protected 使用独立 `limits.max_protected`（默认 20）配额；从 False
+  设为 True 时会在同一 `protected` quota turn 内检查并落盘，
+  满额显式拒绝，不部分修改。
 - `resolved=1` **不**自动归档（B-01 修复）；只更新 frontmatter，由 decay 引擎自然衰减。
 - `status` 仅接受 `active`/`resolved`/`abandoned`，主要用于 plan 桶。
 - `content="..."` 替换正文并重新生成 embedding。
@@ -354,34 +364,33 @@ feel 桶自身：
 
 签名：`pulse(include_archive=False)`
 
-返回：固化/动态/归档桶数、feel/plan/letter 分项数量、总 KB、衰减引擎状态、所有桶（带图标）的元数据摘要行。
+返回：固化/动态/归档桶数、feel/plan/letter 分项数量、总 KB、衰减引擎状态、所有桶（带图标）的元数据摘要行。`metadata.anchor=True` 的桶额外附加独立 `⚓ [anchor]` 标记；该标记只表达冷坐标系状态，不改变原生命周期图标或浮现资格。
 
 ### 3.6 `dream` — 做梦自省
 
-签名：`dream(window_hours=48, inspiration=False)`（默认 48h 窗口；clamp 到 1~336h）
+签名：`dream(window_hours=48)`（默认 48h 窗口；clamp 到 1~336h）
 
-- 默认取过去 48 小时内 `created` 或 `last_active` 任一在窗口内的桶（排除 permanent/feel/pinned/protected/plan/letter，以及 digested/dont_surface/anchor）
-- 排序：先按 `last_active` 倒序；候选超过 **40 个**时改按 `decay_engine.calculate_score()` 降序截断到前 40，避免一次涌进来太多撑爆上下文
-- 拼接桶摘要（完整正文，不截断）+ 自省引导 header
-- embedding 启用时附加：连接提示（最相似对，`>0.5`）+ feel 结晶提示（一条 feel 与 ≥2 条其它 feel 相似度 `>0.7` → 建议升级为 pinned）
-- 仅当调用方显式传 `inspiration=True` 时，在正文前部追加最多三个响应态 Spark 材料/问题候选：
-  - policy-first 只允许活动、未解决、普通 `dynamic` 桶；排除归档/删除/墓碑、`dont_surface`、
-    `digested`、anchor、pinned/protected/permanent 和私有类型
-  - 只读本地 `embeddings.db` 已有向量，不调用 embedding provider；选择语义近邻、跨域桥接及
-    条件反转核查材料，不包含随机通道
-  - 每条带两个来源 ID、完整正文 SHA-256、精确片段跨度、待核查共享结构、不对应处和假设；
-    向量相似度仅为选择证据，不合成灵感分、真值分或行动分
-  - 候选 `persistent=false`、`lifetime=response_only`、`retrievable=false`，不调用
-    `touch/touch_many`、不写桶、不记账、不进入 webhook payload；当前模型保留判断权
-  - embedding 关闭、向量不足或无合格非随机配对时失败关闭为空说明，不回退到普通 search、
-    随机材料或未过滤池
-- 末尾追加 `=== 你的 active plans ===` 全量列表
-- 末尾追加 `=== 你的 feel 历史（全量，旧 feel 按 token 预算折叠）===`：按 `surfacing.feel_max_tokens`（默认 6000）做预算，超出的老 feel 折叠为 60 字符单行摘要
+最终输出按固定顺序拼七段：
 
-(实现细节：用户可手动传更大的 `window_hours`，但软上限 40 仍生效。`inspiration=False`
-保持原 dream 输出；参数只接受布尔值且不会自动翻转。Spark 候选和其边界也计入
-`surfacing.dream_max_tokens`，预算不足时整段省略而不破坏边界。plan 历史不参与 token
-预算全量返回；feel 历史走 token 预算折叠。)
+1. **近期活跃记忆正文**：过去 window_hours 内 `created` 或 `last_active` 任一在窗口内的桶
+   （排除 permanent/feel/pinned/resolved/protected/plan/letter，以及 digested/dont_surface/anchor）。
+   排序先按 `last_active` 倒序；候选超过 **40 个**时改按 `decay_engine.calculate_score()`
+   降序截断到前 40，避免一次涌进来太多撑爆上下文。
+2. **核心准则参考**：pinned/permanent 桶，作为只读背景；protected 不进入。
+3. **你的 active plans**：未受 protected 保护、`status=active` 的 plan，按 created 倒序全量列出。
+4. **你的 feel 历史**：排除 protected 后按 `surfacing.feel_max_tokens`（默认 6000）对最终渲染块
+   计费；新 feel 优先全文，放不下的折叠为 40 字符单行摘录，截断信号直接拼进展示文本末尾
+   （「…」），不依赖任何元数据字段。
+5. **connection hint**：embedding 启用时，在近期桶里找余弦相似度最高的一对（`>0.5`）给出提示。
+6. **crystal hint**：低频触发——要凑够一簇 **5** 条互相相似（`>0.7`）的 feel 才提示一次
+   「可以考虑 `hold(pinned=True)` 升级」，避免同一批 feel 每场梦都刷同样的提示。
+7. **「我觉得」I 候选段**：列出待沉淀的候选，选取规则并入第 1 段的同一套 48 小时窗口/排除
+   pinned/排除 resolved 规则（protected 排除单独保留）；每条附本次撞上的材料与见证次数。
+
+整体输出受 `surfacing.dream_max_tokens`（默认 20000）硬预算约束，超预算只整段省略、绝不
+截断正文；用户可手动传更大的 `window_hours`，但软上限 40 仍生效；plan 历史不参与 token
+预算全量返回，feel 历史走 token 预算折叠。展示正文只做双链正则清理（不改磁盘原文），
+每条渲染出的桶下面附一行简洁 Footprint。
 
 ### 3.7 `plan` — 登记待办
 
@@ -391,7 +400,7 @@ feel 桶自身：
 
 **严格字符串去重**：登记前扫描所有 `status="active"` 的 plan 桶，若存在 `content` 与新内容**完全字符串相等**的桶，直接返回原 ID 不重复创建（避免重复 `plan("还没回邮件")` 刷屏）。
 
-**自动结案机制**：每次 `hold()` 或 `grow()` 末尾 `asyncio.create_task(_check_plan_resolution())` —— 向量预筛（>0.7）→ LLM 双判 (`resolved && confidence >= 0.7`) → 写 `status="resolved"` + `resolution_reason` + `resolved_by`。任何异常都吞掉，不影响主流程。无 embedding 时整个机制跳过（保守，宁漏报不误报）。
+**完成建议机制**：每次 `hold()` 或 `grow()` 末尾 `asyncio.create_task(_check_plan_resolution())`。系统只把关键词/BM25 或向量（>0.7）实际召回的 active plan 交给 LLM；当 `resolved && confidence >= 0.7` 时写入 `resolution_suggested`（理由、信心、来源与时间），status 仍保持 `active`。实际关闭只能由 `trace(status="resolved")` 或 Dashboard action 显式完成。任何异常都吞掉，不影响主流程；无 embedding 时仍使用关键词/BM25 召回。
 
 ### 3.8 `letter_write` / `letter_read` / `letter_lock_update` — 信件
 
@@ -405,13 +414,15 @@ Dashboard 的既有 `/api/letter/{letter_id}` PATCH 同时承载两类互斥请�
 
 信件特性：永不衰减、永不合并、不参与压缩。`/breath-hook` 以 hook Token 为 AI 视角、Dashboard session 为人类视角；公开未认证 hook 不返回任何仍锁定内容。时间锁是应用层访问边界，不是磁盘加密，主机或 vault 文件权限持有者仍可读取 Markdown 原文。
 
+历史版本中若 Letter 已异常进入 `archive/`，使用登录后维护接口 `/api/maintenance/restore-archived-letters`：先发 GET 做只读 dry-run，再把确认过的候选 ID 以 `POST {"ids":["..."]}` 显式提交；系统不会启动时自动迁移。恢复只接受 `source_tool=letter` 或 `__letter__` 强标记，并在写入前于同一桶租约内重新校验唯一物理真源；删除墓碑、pinned/protected/anchor、弱线索或碰撞项均拒绝。迁移仅把 `type` 改回 `letter` 并原子移入 `letters/history/`，正文、作者、时间与锁字段不变，也不刷新 `last_active`；响应禁用缓存且只报告 ID、计数与原因。
+
 ### 3.9 `anchor` — 标记坐标系桶（iter 2.0）
 
 签名：`anchor(bucket_id)`
 
 把指定桶的 `anchor` frontmatter 字段置为 `True`。**硬上限 24**（`BucketManager.ANCHOR_LIMIT`），由 `set_anchor()` 入口校验；`update()` 透传路径也补了同样校验（False→True 切换时计数，已是 anchor 的重复设置幂等）。超过上限返回 `{ok:False, error:"anchor 已达上限 24"}`，REST 端点 `/api/bucket/{id}/anchor` 返回 **409**。
 
-语义：anchor 是「坐标系」——告诉模型「这是定位用的参照点，不是日常需要冒出来的内容」。anchor 桶**不参与无参 `breath()` 浮现**，但 `query` / `domain` / `importance_min` 等显式检索仍可命中。**与 pinned / dont_surface / weight 完全独立**，不参与 `calculate_score()`。
+语义：anchor 是「坐标系」——告诉模型「这是定位用的参照点，不是日常需要冒出来的内容」。anchor 桶**不参与无参 `breath()` 浮现**，但 `query` / `domain` / `importance_min` 等显式检索仍可命中；`pulse()` 与 catalog 用 `⚓ [anchor]` 暴露其存在而不注入正文。anchor 与 pinned/protected 互斥，与 dont_surface/weight 独立，不参与 `calculate_score()`。
 
 ### 3.10 `release` — 释放坐标系标记（iter 2.0）
 
@@ -432,9 +443,9 @@ Dashboard 的既有 `/api/letter/{letter_id}` PATCH 同时承载两类互斥请�
 
 dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 
-- `collect_self_candidates(all_buckets)` 收集全部待沉淀候选，用**已落盘向量**（不发新请求）为每条取相似度 ≥ 0.35 的前 3 条对照材料；对照池 = 全部正式 I 条目 + 全部其它候选 + 最近 200 条普通桶（排除 `letter`）。向量不可用时只列候选并明说。
-- 输出段落排在 recent 段之后、active plan 段之前，受 `surfacing.dream_max_tokens` 预算约束。
-- 见证计数由 `dream/__init__.py` 在渲染成功后调 `tools.i.record_dream_pass()` 写入，按天去重；因预算未展开的候选不计次——没被看见的不算经历过。
+- `collect_self_candidates(all_buckets, window_hours)` 收集窗口内待沉淀候选，用**已落盘向量**（不发新请求）为每条取相似度 ≥ 0.35 的前 3 条对照材料；对照池 = 全部正式 I 条目 + 全部其它候选 + 最近 200 条普通桶（排除 `letter`）。向量不可用时只列候选并明说。
+- 专用候选段排在 dream 其它上下文之后，受 `surfacing.dream_max_tokens` 预算约束；候选本身也可能作为普通近期记忆，或作为另一条候选的碰撞材料出现。
+- 见证计数由 `dream/__init__.py` 在最终输出渲染完成后调 `tools.i.record_dream_pass()` 写入，按不同日期去重。只要待沉淀候选的结构化记忆块实际出现在本次输出（近期记忆、候选主块或碰撞材料），就算一次见证；所有位置都因预算未展开时才不计次。
 - 碰撞只摆材料，**不做矛盾/重复判定**（认知层边界，`rule.md` 第 5 条）。
 
 ---
@@ -588,7 +599,7 @@ FTS 搜索只用于本地验证和未来 projection 迁移准备，当前只索�
 - Dashboard `/api/breath` 轻量浮现接口。
 
 当前规则：
-- `spontaneous` / `dream` 模式拒绝 `dont_surface=True`、`digested=True`、`anchor=True`、`feel/plan/letter/self/i`、`archived`、`deleted_at`、`tombstone`；`search` 与显式 importance 审计仍允许读取 digested。
+- `spontaneous` / `dream` 模式拒绝 `dont_surface=True`、`digested=True`、`anchor=True`、`protected=True`、`feel/plan/letter/self/i`、`archived`、`deleted_at`、`tombstone`；`search` 与显式 importance 审计仍允许读取 digested/protected。
 - `importance` 模式拒绝 `dont_surface=True` 与专用类型，但保留 anchor 可达性。
 - `search` 模式只拒绝终态（archived / deleted / tombstone），显式关键词搜索仍可找回 `dont_surface=True` 的记忆。这是主动遗忘契约：不主动冒出来，但没有被抹去。
 
@@ -1241,7 +1252,8 @@ Phase 47 后，`LegacyRuntime` 会暴露 `score_retrieval_bucket(...)` / `rank_r
 | `first_of_kind` | bool | False | 自动检测：写入新桶时若其 `tags` 与全库已有 `tags` **完全无交集**则置 True。仅展示用，dashboard 旁亮 ✨。失败不阻塞写入。 | ❌ |
 | `weight` | float ∈ [0,1] | None（仅 plan 写） | plan 桶专有「承诺重量」。由 `plan(content, weight=0.7, ...)` 写入（hold 没有 `domain` 参数，不能用 `hold(domain=["plan"], ...)` 创建 plan）；或事后 `trace(weight=0.7)` 调整。dashboard 计划看板按 weight 倒序排 active 列。**与 importance 是两个轴**：importance 是事的客观重要度，weight 是这件事压在心头的主观重量。 | ❌ |
 | `triggered_by` | str (bucket_id) | 不写 | feel/衍生桶的因果链入口：记下「我这条感受是被哪条记忆触发的」。1.9 会做 UI 联动。 | ❌ |
-| `anchor` | bool | 不写 (False) | **iter 2.0**：坐标系标记。True 时该桶**不参与**无参 `breath()` 浮现池——即使 pinned 也不浮现。但 `query` / `domain` / `importance_min` 命中时仍返回（检索 / 重要度模式不过滤 anchor；Feel 通道只看 type=feel，也不过滤）。硬上限 24（`BucketManager.ANCHOR_LIMIT`）：`set_anchor()` 入口与 `update(anchor=True)` 透传路径都会校验（False→True 切换计数，幂等重复设置不计），超过返回 `{ok:False, error}` / 端点返回 409。通过 `anchor()` MCP tool / `release()` MCP tool / `POST /api/bucket/{id}/anchor` 切换；**`trace` 不暴露该字段**。**不参与评分；与 pinned/dont_surface/weight 完全独立**。 | ❌ |
+| `protected` | bool | 不写 (False) | 防衰减保护。通过 `trace(protected=1\|0, ...)` 修改；不主动注入无参 `breath()`、dream 任一候选/提示/附加段或 `/breath-hook` 任一主池/附加池，但显式 search/catalog 可见并标记为「🛡️ [受保护记忆]」。独立硬上限由 `limits.max_protected` 控制。 | ✅（短路 999） |
+| `anchor` | bool | 不写 (False) | **iter 2.0**：坐标系标记。True 时该桶**不参与**无参 `breath()` 浮现池——即使 pinned 也不浮现。但 `query` / `domain` / `importance_min` 命中时仍返回（检索 / 重要度模式不过滤 anchor；Feel 通道只看 type=feel，也不过滤）。硬上限 24（`BucketManager.ANCHOR_LIMIT`）：`set_anchor()` 入口与 `update(anchor=True)` 透传路径都会校验（False→True 切换计数，幂等重复设置不计），超过返回 `{ok:False, error}` / 端点返回 409。通过 `anchor()` MCP tool / `release()` MCP tool / `POST /api/bucket/{id}/anchor` 切换；**`trace` 不暴露该字段**。**不参与评分；与 pinned、protected 互斥，与 dont_surface/weight 独立**。 | ❌ |
 | `source_tool` | str (`hold`/`grow`) | 不写 | **iter 2.0**：记录「这条桶是哪个工具创建的」。`hold` 路径（含 `feel=True` 子分支）写 `hold`；`grow`（含短路径与 digest 拆出来的每条）写 `grow`。**合并不会改这个字段**——保留原桶最初来源；合并触发方写到下面的 `last_merged_by`。dashboard 桶详情可按 source 筛选。letters/plans/anchor 等不写此字段（它们的 `type` 已经表明出处）。 | ❌ |
 | `grow_batch_id` | str (`g_<12hex>`) | 不写 | **iter 2.0**：仅 `grow` 创建的桶有此字段，同一次 `grow` 调用里所有新建桶共享同一个 batch_id（包括短路径，即使只产出一条）。dashboard 可按 batch 聚合「这次日记一共归档了哪些事件」。合并不写此字段（合并到的老桶可能来自完全不同的批次/工具，硬覆盖会丢失原始批次信息）。 | ❌ |
 | `last_merged_by` | str (`hold`/`grow`) | 不写 | **iter 2.0**：仅在桶被合并时由 `_common.merge_or_create` 写入，记录「最近一次合并是被哪个工具触发的」。原桶最初来源仍由 `source_tool` 表达。 | ❌ |
@@ -1372,21 +1384,23 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | 类型 (`type`) | 目录 | importance | 衰减分 | 普通 breath 浮现 | 参与合并 | 参与 dream | 自动归档 |
 |---|---|---|---|---|---|---|---|
 | `dynamic` | `dynamic/{domain}/` | 1~10 | 公式计算 | ✅ | ✅ | ✅ | ✅ |
-| `permanent`（可独立于 `pinned`） | `permanent/{domain}/` | 显式 permanent 为 1~10；pinned 锁 10 | 999 | 作为固化记忆展示 | ❌ | ❌ | ❌ |
+| `permanent`（可独立于 `pinned`） | `permanent/{domain}/` | 显式 permanent 为 1~10；pinned 锁 10 | 999 | 作为固化记忆展示；`protected=True` 时不主动展示 | ❌ | ❌ | ❌ |
 | `feel` | `feel/沉淀物/` | 5 | 50 | ❌（仅 `domain="feel"`） | ❌ | 仅参与结晶检测 | ❌ |
 | `plan` | `plans/active/` | 7 | 50 | ❌（仅 dream 末尾 active 段） | ❌ | dream 列出 | ❌ |
 | `letter` | `letters/history/` | 10 | 50 | ❌（仅 `/breath-hook` 末尾各最新一封） | ❌ | ❌ | ❌ |
 | `archived` | `archive/{domain}/` | — | — | ❌ | ❌ | ❌ | — |
 
-**新建时初始字段**：`activation_count = 0`（B-04 修复值；曾经是 1 导致冷启动检测失效）；`resolved/pinned/digested` 不显式写入，仅在变更时才出现在 frontmatter 中。
+**新建时初始字段**：`activation_count = 0`（B-04 修复值；曾经是 1 导致冷启动检测失效）；`resolved/pinned/protected/digested` 默认不显式写入，仅在变更时才出现在 frontmatter 中。
 
 **permanent 与 pinned 的配额关系**：配额唯一真相是 `metadata.pinned=True`。`type=="permanent"` 是独立的固化类型，不会仅因目录或 type 占用 `limits.max_pinned`（默认 20）；只有真正 pinned 的桶占配额并锁定 importance=10。`feel` / `plan` / `letter` 同样不占该配额。
 
 `pinned` 计数按逻辑 bucket ID 去重，并通过 `parse_bool` 解释历史 YAML 布尔值；archived/deleted/tombstone 是终态，不占 pinned 名额，也不能通过常规 `BucketManager.update()`、Dashboard 或导入复核重新激活。
 
-**importance≥9 配额口径**：只统计能被 `breath_advanced(importance_min=9)` 审计的普通记忆，再排除走独立配额的 `pinned/protected`。因此 `dont_surface`、`feel/plan/letter`、archived/deleted/tombstone 不占该池；显式且未 pinned 的 `permanent` 仍属于普通高重要度候选。历史恢复或手工文件可能产生同 ID 的物理副本，配额始终按逻辑 bucket ID 只计一次。取消钉选、恢复浮现、特殊类型转回 dynamic/permanent、历史对话在线导入，以及其他在线新建/合并导致 importance 升到 9+ 时，资格检查和写盘必须在同一个 `high_importance` quota turn 内完成；历史对话导入本身只做精确内容去重，不再语义合并旧桶。备份迁移、`write_memory.py` 和手工 Markdown 属于受信任的保真/维护入口，允许原样恢复或直接修订数据，不适用在线写入配额。
+`protected` 使用独立 `limits.max_protected`（默认 20）。计数只看活跃、非终态且 `metadata.protected=True` 的逻辑桶，按 bucket ID 去重；显式 permanent 和 pinned 不会自动占用 protected 配额。False→True 的检查与落盘必须在同一 `protected` quota turn 内完成，满额必须硬拒绝。
 
-(实现注意：`pinned` 和 `protected` 在代码里几乎等价处理，但 `protected` 是历史遗留字段，新桶不应再写；UI 只暴露 pinned。)
+**importance 不设硬配额**：rule.md §2 的稀缺性哲学由 `pinned`（20）/`anchor`（24）两个结构承担；`importance` 只是普通评分字段，`importance>=9` 没有硬上限、软警告或自动降级，`is_importance_audit_candidate()` 只用来定义 `breath_advanced(importance_min=...)` 的可审计范围，不再是配额口径。
+
+(实现注意：`pinned` 是需要主动重见的核心准则；`protected` 只防衰减、不主动浮现。两者互斥，单桶不能同时为 True；均可由 trace 显式修改，但使用独立配额，不得再把 protected 当作 pinned 注入。)
 
 ---
 
@@ -1396,7 +1410,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `transport` | `stdio` | `stdio` / `sse` / `streamable-http` |
+| `transport` | `stdio` | `stdio` / `streamable-http`（legacy SSE 已于 2026-08-09 下线） |
 | `log_level` | `INFO` | 日志级别 |
 | `buckets_dir` | `./buckets` | 记忆桶目录 |
 | `merge_threshold` | `75` | 合并相似度阈值 (0~100) |
@@ -1426,6 +1440,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `hooks.allow_public` | `false` | 是否允许 hook 无鉴权访问；也可用 `OMBRE_HOOK_ALLOW_PUBLIC=true`，仅建议在外层已有鉴权时开启 |
 | `limits.max_bucket_bytes` | `51200` (50KB) | 单桶内容字节上限（iter 1.6 §5）；0 禁用 |
 | `limits.max_pinned` | `20` | `metadata.pinned=True` 桶数量上限；显式 permanent 不占；0 禁用 |
+| `limits.max_protected` | `20` | 活跃、非终态的 `metadata.protected=True` 逻辑桶上限；按 ID 去重；0 禁用 |
 | `limits.max_mcp_request_bytes` | `4194304` | `/mcp` 请求体上限；0 禁用 |
 | `limits.max_management_request_bytes` | `4194304` | Dashboard/OAuth 普通写请求上限；导入上传使用独立上限；0 禁用 |
 | `bucket_type_defaults.{type}.{field}` | （空） | iter 1.9：按桶类型覆盖 importance/valence/arousal 默认值。例：`bucket_type_defaults.feel.importance: 5`。`bucket_manager.create()` 在不传入该字段时查此表 |
@@ -1450,7 +1465,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `OMBRE_EMBED_MODEL` | `gemini-embedding-001` | 覆盖 `embedding.model` |
 | `OMBRE_EMBED_BACKEND` | （已废弃） | 旧的本地后端选择（bge-small-zh/bge-m3 sentence-transformers）已移除；现在统一走 `api` 后端，本地离线靠 `OMBRE_EMBED_BASE_URL` 指向 Ollama 边车 + 填本地模型名 |
 | `OMBRE_TRANSPORT` | `stdio` | 覆盖 `transport` |
-| `OMBRE_PORT` | `8000` | HTTP/SSE 监听端口 |
+| `OMBRE_PORT` | `8000` | HTTP 监听端口 |
 | `OMBRE_BUCKETS_DIR` | `./buckets` | 覆盖 `buckets_dir`（Docker volume 必设） |
 | `OMBRE_VAULT_DIR` | — | `OMBRE_BUCKETS_DIR` 未设时的 fallback（二者同义，`OMBRE_BUCKETS_DIR` 优先） |
 | `OMBRE_HOOK_URL` | — | Webhook 推送地址；空则不推送 |
@@ -1506,7 +1521,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `0.2` | `breath` 检索 | 情感重构系数 `(q_v - 0.5) × 0.2`，最大 ±0.1 |
 | `3` / `0.4` / `2.0` / `1~3` | `breath` 检索 | 随机漂浮触发条件 / 概率 / 池阈值 / 数量 |
 | `30` 字符 | `grow` | 短内容快速路径阈值 |
-| `0.7` | `_check_plan_resolution` | plan 自动结案向量预筛 |
+| `0.7` | `_check_plan_resolution` | plan 完成建议的向量预筛 |
 | `0.7` | dream | feel 结晶相似度阈值 |
 | `0.5` | dream | 连接提示相似度阈值 |
 | `10` | dream | 取最近 N 条 |
@@ -1548,7 +1563,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `trace` 无字段变更 | — | 返回「没有任何字段需要修改。」 |
 | `dehydrator.dehydrate` API 不可用 | `api_available=False` | 不影响 breath；正文返回阶段不再调用 dehydrator |
 | `embedding.search_similar` 未启用 | enabled=False | 返回 `[]`，调用方 fallback |
-| `_check_plan_resolution` 无 embedding | — | 整体跳过（保守，不误报） |
+| `_check_plan_resolution` 无 embedding | — | 退回关键词/BM25 召回；未命中就不交给 LLM |
 | `decay_cycle` list_all 失败 | 异常 | 返回 `{checked:0, error:str}`，不终止后台循环 |
 | `decay_cycle` 单桶评分失败 | 异常 | WARNING 日志，跳过该桶 |
 
@@ -1588,6 +1603,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | `breath()` 无参返回「权重池平静」但桶其实存在 | `tools/breath/` | 浮现分支；检查 `bucket_mgr.list_all()` 是否漏遍历某子目录 |
 | 应该浮现的钉选桶没出现 | `tools/breath/` | 浮现分支的 pinned 过滤；`bucket_mgr.create` 是否写入 `pinned: True` |
+| protected 桶出现在无参 breath/dream/hook | `tools/breath/` + `tools/dream/` + `web/hooks.py` | protected 应只防衰减；检查主候选、提示、plan/feel、Letter/I 等附加池是否统一显式排除 |
 | 钉选桶 importance 不是 10 | `bucket_manager.py` | `create()`（pinned 锁 10）+ `update()`（pinned 重新锁 10） |
 | 检索结果排序看着不对 | `bucket_manager.py` | `search()` Layer 2 + `_calc_topic_score / _calc_emotion_score / _calc_time_score` |
 | 关键词明明在桶名里却没命中 | `bucket_manager.py` | `_calc_topic_score`（rapidfuzz partial_ratio 阈值）+ `fuzzy_threshold` 配置 |

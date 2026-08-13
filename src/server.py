@@ -32,6 +32,7 @@ import sys
 import logging
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from typing import Optional, Awaitable
 import httpx
 
@@ -43,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import FastMCP
 
 from bucket_manager import BucketManager
+from deletion_requests import DeletionRequestStore
 from dehydrator import Dehydrator
 from decay_engine import DecayEngine
 from embedding_engine import EmbeddingEngine
@@ -218,6 +220,9 @@ except RuntimeError as _emb_err:
     logger.error(f"[STARTUP FAILED] {_emb_err}")
     raise SystemExit(f"Ombre Brain 启动中止：{_emb_err}") from _emb_err
 bucket_mgr = BucketManager(config, embedding_engine=embedding_engine)  # Bucket manager / 记忆桶管理器
+deletion_requests = DeletionRequestStore(
+    config["buckets_dir"], bucket_mgr, embedding_engine
+)
 _source_max_bytes = int(
     (config.get("limits") or {}).get("max_grow_input_bytes", 2 * 1024 * 1024)
 )
@@ -311,7 +316,7 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 
 
 # --- Create MCP server instance / 创建 MCP 服务器实例 ---
-# host="0.0.0.0" so Docker container's SSE is externally reachable
+# host="0.0.0.0" so Docker container's HTTP endpoint is externally reachable
 # stdio mode ignores host (no network)
 #
 # iter 2.2 后对外只有单连接器 /mcp。当前 16 个工具全部直接注册到
@@ -320,13 +325,32 @@ _gh_auto_interval: int = int(_gh_cfg.get("auto_interval_minutes") or 0)
 #
 # 远程 Streamable HTTP 固定返回单个 JSON-RPC 对象，并且不要求客户端在
 # initialize 后保存/回传 Mcp-Session-Id。Kelivo 等会静默吞掉 tools/list 异常的
-# 客户端因此不会再出现“已连接但 0 工具”。stdio 与 legacy SSE 不受这两项影响。
+# 客户端因此不会再出现“已连接但 0 工具”。stdio 不受这两项影响。
+
+_stdio_runtime_lifecycle = None
+
+
+@asynccontextmanager
+async def _stdio_lifespan(_server):
+    lifecycle = _stdio_runtime_lifecycle
+    if lifecycle is None:
+        yield {}
+        return
+
+    await lifecycle.start()
+    try:
+        yield {}
+    finally:
+        await lifecycle.stop()
+
+
 mcp = FastMCP(
     "Ombre Brain",
     host=_BIND_HOST,
     port=OMBRE_PORT,
     json_response=True,
     stateless_http=True,
+    lifespan=_stdio_lifespan if config.get("transport", "stdio") == "stdio" else None,
 )
 
 
@@ -389,6 +413,7 @@ _wsh.init_runtime(
     version=__version__,
     repo_root=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     bucket_mgr=bucket_mgr,
+    deletion_requests=deletion_requests,
     dehydrator=dehydrator,
     decay_engine=decay_engine,
     embedding_engine=embedding_engine,
@@ -591,6 +616,7 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
 _tools_runtime.init(
     config=config,
     bucket_mgr=bucket_mgr,
+    deletion_requests=deletion_requests,
     dehydrator=dehydrator,
     decay_engine=decay_engine,
     embedding_engine=embedding_engine,
@@ -698,7 +724,7 @@ async def breath_advanced(
     date_from: Optional[str] = "",
     date_to: Optional[str] = "",
 ) -> str:
-    """breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆;传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写；max_tokens 不足时整桶省略，绝不截断正文。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),适合开新对话先看目录再 breath_search(query=...) 精准拉取,并遵守 domain、tags 与 max_results。date_from/date_to 按桶的创建时间过滤，支持 YYYY-MM-DD 或 ISO 8601。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。"""
+    """breath 的完整参数版,给需要精细控制的场景用(日常用 breath()/breath_search() 就够了)。不传 query=返回权重最高的未解决记忆;传 query=融合关键词/BM25+语义检索，向量不可用时明确提示并退回关键词检索。命中后逐字返回桶内当前 content，不调用 LLM 摘要/改写；max_tokens 不足时整桶省略，绝不截断正文。catalog=True=目录模式:只返回每桶一行元数据(名称|域|重要度,0 LLM 调用,最省 token),anchor 行带 ⚓ [anchor] 冷参考标记,适合开新对话先看目录再 breath_search(query=...) 精准拉取,并遵守 domain、tags 与 max_results。date_from/date_to 按桶的创建时间过滤，支持 YYYY-MM-DD 或 ISO 8601。max_tokens=单次返回总 token 上限(默认 config.surfacing.breath_max_tokens,fallback 10000)。domain 逗号分隔,valence/arousal 0~1(-1 忽略)。max_results=返回条数上限(默认 config.surfacing.breath_max_results,fallback 20,最大 50)。importance_min>=1=跳过语义检索,按重要度降序返回最多 20 条高重要度记忆。tags 逗号分隔,AND 过滤;tags=\"feel\" 或 \"__feel__\" 等价于 domain=\"feel\",返回所有 feel 类记忆。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
@@ -731,14 +757,15 @@ async def hold(
     meaning: Optional[str] = "",
     media: Optional[list | str] = None,
     test_data: Optional[bool] = False,
+    domain: Optional[str] = "",
 ) -> str:
-    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。content 逐字保存，绝不压缩。title 可选；传入时是最终显式标题，优先于打标模型建议。系统自动补其余元数据，API 不可用时使用本地中性值继续保存。tags 逗号分隔，importance 1-10。pinned=True 标记为永久核心；feel=True 存为感受类记忆。source_bucket 是正在消化的原始记忆桶 ID。why_remembered 与 meaning 是可选的第一人称记录原因。media 可传服务器可读路径或 data_base64+filename 列表项。"""
+    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。content 逐字保存，绝不压缩。title 可选；传入时是最终显式标题，优先于打标模型建议。domain 可选、逗号分隔；显式传入时优先于打标模型结果。系统自动补其余元数据，API 不可用时使用本地中性值继续保存。tags 逗号分隔，importance 1-10。pinned=True 标记为永久核心；feel=True 存为感受类记忆且 domain 固定为 feel。source_bucket 是正在消化的原始记忆桶 ID。why_remembered 与 meaning 是可选的第一人称记录原因。media 可传服务器可读路径或 data_base64+filename 列表项。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, title=title, tags=tags, importance=importance,
             pinned=pinned, feel=feel, source_bucket=source_bucket,
             valence=valence, arousal=arousal, why_remembered=why_remembered,
-            meaning=meaning, media=media, test_data=test_data,
+            meaning=meaning, media=media, test_data=test_data, domain=domain,
         ),
         op="hold",
         args={
@@ -748,19 +775,25 @@ async def hold(
             "why_len": len(why_remembered or ""), "meaning_len": len(meaning or ""),
             "media_count": len(media or []),
             "test_data": bool(test_data),
+            "domain": domain,
         },
     )
 
 
 @mcp.tool()
-async def grow(content: str = "", items: Optional[list] = None) -> str:
+async def grow(
+    content: str = "", items: Optional[list] = None, test_data: Optional[bool] = False
+) -> str:
     """仅在对话中已明确要求整理并写入长期记忆时调用，不要根据普通聊天自行推断写入意图。整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。
 
-    进阶(可选):若你已经把长文拆成 N 条最终正文，可传字符串 items，或对象 items=[{"title":"最终标题","content":"最终正文","tags":["中文短标签"],"importance":5,"domain":["恋爱"],"valence":0.8,"arousal":0.4,"source_ranges":[[1,20]]}]。显式字段优先于自动打标，正文逐字入库，合并时也不压缩。同时传 content 时，content 是整批共享的隐藏原文证据，只保存一次；source_ranges 使用 1-based 闭区间把每个桶连回自己的原文片段。"""
+    进阶(可选):若你已经把长文拆成 N 条最终正文，可传字符串 items，或对象 items=[{"title":"最终标题","content":"最终正文","tags":["中文短标签"],"importance":5,"domain":["恋爱"],"valence":0.8,"arousal":0.4,"why_remembered":"我为什么要留下这条","source_ranges":[[1,20]]}]。显式字段优先于自动打标，正文逐字入库，合并时也不压缩。人工 why_remembered 与 digest/短内容打标生成的合法理由都会在首次新建时保存；后续合并仅补旧空值，绝不覆盖人工或历史理由。模型漏字段或返回非法理由时仍正常保存正文。同时传 content 时，content 是整批共享的隐藏原文证据，只保存一次；source_ranges 使用 1-based 闭区间把每个桶连回自己的原文片段。"""
     return await _with_notice(
-        _t_grow.dispatch(content, items=items),
+        _t_grow.dispatch(content, items=items, test_data=test_data),
         op="grow",
-        args={"content_len": len(content or ""), "items": len(items or [])},
+        args={
+            "content_len": len(content or ""), "items": len(items or []),
+            "test_data": bool(test_data),
+        },
     )
 
 
@@ -802,6 +835,7 @@ async def trace(
     tags: Optional[str] = "",
     resolved: Optional[int] = -1,
     pinned: Optional[int] = -1,
+    protected: Optional[int] = -1,
     digested: Optional[int] = -1,
     content: Optional[str] = "",
     delete: Optional[bool] = False,
@@ -818,11 +852,16 @@ async def trace(
     restore: Optional[bool] = False,
     old_str: Optional[str] = "",
     new_str: Optional[str] = None,
+    deletion_request_id: Optional[str] = "",
+    deletion_decision: Optional[str] = "",
+    deletion_ai_reason: Optional[str] = "",
 ) -> str:
     """仅在明确需要修改某条已存在记忆时调用，不要猜测 bucket_id 或自行改写记忆。
 
     resolved=1 标记已放下；resolved=0 重新激活。pinned=1 标记永久核心并锁定
-    importance=10；pinned=0 取消时必须在同一次调用显式传入 importance=1..10。
+    importance=10。protected=1 保护记忆不被衰减，但不作为核心准则强制浮现；
+    它与 pinned/anchor 互斥且同样锁定 importance=10。解除最后一层
+    pinned/protected 保护时，必须在同一次调用显式传入 importance=1..10。
     digested=1 标记已消化并从默认/被动浮现及 dream 隐藏，
     但仍可通过显式 query、importance 审计或目录找回。content 会完整替换正文；
     old_str/new_str 会在完整原文中做唯一、逐字的局部替换（new_str 可为空以删除），
@@ -833,13 +872,26 @@ async def trace(
     物理抹除。hard_delete=True 仅用于清理创建时明确标记 test_data=True 的测试桶，
     必须单独提供非空 delete_reason；普通记忆和 plan 一律拒绝且不会顺带归档。
     delete 与 hard_delete 不能同时使用。归档记忆只有在反思后决定值得再次回忆时，才单独调用
-    trace(bucket_id="...", restore=True) 恢复；检索命中不会自动恢复。只传需要修改的字段，-1 或空串表示不改。
+    trace(bucket_id="...", restore=True) 恢复；若历史归档同时带有 protected/anchor，
+    只能用 restore=True、protected=0、importance=1..10 原子解除冲突后恢复。
+    检索命中不会自动恢复。只传需要修改的字段，-1 或空串表示不改。
     """
+    if deletion_request_id or deletion_decision:
+        result = await deletion_requests.decide(
+            deletion_request_id or "",
+            deletion_decision or "",
+            deletion_ai_reason or "",
+            expected_bucket_id=bucket_id,
+        )
+        if not result.get("ok"):
+            return "Deletion request decision failed: " + str(result.get("error") or "unknown error")
+        return f"Deletion request {deletion_request_id} {result['decision']}; bucket {result['bucket_id']}."
     return await _with_notice(
         _t_trace.dispatch(
             bucket_id=bucket_id, name=name, domain=domain,
             valence=valence, arousal=arousal, importance=importance,
-            tags=tags, resolved=resolved, pinned=pinned, digested=digested,
+            tags=tags, resolved=resolved, pinned=pinned,
+            protected=protected, digested=digested,
             content=content, delete=delete, status=status, weight=weight,
             dont_surface=dont_surface, why_remembered=why_remembered,
             meaning_append=meaning_append, meaning_replace=meaning_replace,
@@ -852,7 +904,8 @@ async def trace(
         args={
             "bucket_id": bucket_id, "name": name, "domain": domain,
             "valence": valence, "arousal": arousal, "importance": importance,
-            "tags": tags, "resolved": resolved, "pinned": pinned, "digested": digested,
+            "tags": tags, "resolved": resolved, "pinned": pinned,
+            "protected": protected, "digested": digested,
             "content_len": len(content or ""), "delete": delete, "status": status,
             "hard_delete": hard_delete,
             "restore": restore,
@@ -893,23 +946,18 @@ except (AttributeError, RuntimeError, TypeError, ValueError) as _trace_schema_ex
 @mcp.tool()
 async def dream(
     window_hours: Optional[int] = 48,
-    inspiration: bool = False,
 ) -> str:
     """读取最近 window_hours（默认 48h）内有变动的所有记忆桶,用于回顾与消化。
     每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断。
     可据此操作：放下的 → trace(resolved=1) 沉底；有沉淀的 → hold(feel=True, source_bucket=...) 记录；无沉淀则不操作。
-    候选桶超过 40 时按 decay_engine.calculate_score() 排序取前 40，避免一次返回过多。
-    inspiration=True 时额外返回最多三个只读、带来源、仅本次响应有效的灵感材料/问题候选；
-    默认 False，不会自动触发，不新增 MCP 工具，也不会 touch、写回或让候选取得事实/行动权。"""
+    候选桶超过 40 时按 decay_engine.calculate_score() 排序取前 40，避免一次返回过多。"""
     return await _with_notice(
         _t_dream.dispatch(
             window_hours=window_hours,
-            inspiration=inspiration,
         ),
         op="dream",
         args={
             "window_hours": window_hours,
-            "inspiration": inspiration,
         },
     )
 
@@ -936,7 +984,7 @@ async def release(bucket_id: str) -> str:
 
 @mcp.tool()
 async def pulse(include_archive: Optional[bool] = False) -> str:
-    """返回记忆系统状态摘要:固化/动态/归档/feel/plan/letter 数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表。include_archive=True 同时返回归档区。"""
+    """返回记忆系统状态摘要:固化/动态/归档/feel/plan/letter 数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表；anchor 行带独立 ⚓ [anchor] 冷参考标记。include_archive=True 同时返回归档区。"""
     return await _with_notice(
         _t_anchor.pulse(include_archive=include_archive),
         op="pulse",
@@ -952,7 +1000,7 @@ async def plan(
     weight: Optional[float] = 0.5,
     why_remembered: Optional[str] = "",
 ) -> str:
-    """登记一个待办/承诺/未闭环事项。status=active(默认)/resolved/abandoned。related_bucket 可选,关联到某个普通记忆桶。weight=承诺重量 0.0-1.0(默认 0.5),与 importance 区分——importance 表示「多重要」、weight 表示「多重」。why_remembered=登记原因(可选、仅展示)。plan 不衰减、不出现在普通 breath,仅在 dream 末尾的 active 段返回;后续 hold/grow 写入新事件时系统自动判断已登记的 plan 是否完成。"""
+    """登记一个待办/承诺/未闭环事项。status=active(默认)/resolved/abandoned。related_bucket 可选,关联到某个普通记忆桶。weight=承诺重量 0.0-1.0(默认 0.5),与 importance 区分——importance 表示「多重要」、weight 表示「多重」。why_remembered=登记原因(可选、仅展示)。plan 不衰减、不出现在普通 breath,仅在 dream 末尾的 active 段返回;后续 hold/grow 写入新事件时系统只会提示可能已完成,实际关闭必须显式调用 trace(status="resolved")。"""
     return await _with_notice(
         _t_plan.plan_create(
             content=content, status=status, related_bucket=related_bucket,
@@ -1156,7 +1204,7 @@ if __name__ == "__main__":
         build_http_app,
     )
 
-    if transport in ("sse", "streamable-http"):
+    if transport == "streamable-http":
         import uvicorn
         from web import ollama_local as _ollama_local
 
@@ -1255,7 +1303,7 @@ if __name__ == "__main__":
             logger.info(f"Listening on :{OMBRE_PORT} (bare-metal / 裸机默认 18001)")
         # 明确打印「客户端该怎么连」——给 Operit / 安卓 / 自建前端等非技术用户排障用。
         # 一眼能看清 endpoint 路径、鉴权开关；本机桥接务必用 127.0.0.1（见上方保活注释）。
-        _endpoint_path = "/sse" if transport == "sse" else "/mcp"
+        _endpoint_path = "/mcp"
         logger.info(
             "MCP endpoint ready | transport=%s | 本机连接 URL: http://127.0.0.1:%s%s "
             "（远程走你的域名/隧道，末尾同样是 %s）| 鉴权: %s",
@@ -1283,6 +1331,27 @@ if __name__ == "__main__":
             port=OMBRE_PORT,
             proxy_headers=False,
         )
-    else:
-        # stdio：16 个工具已直接注册在唯一 mcp 实例上，这里直接运行即可。
+    elif transport == "stdio":
+        # stdio：16 个工具已直接注册在唯一 mcp 实例上；启动成功边界由
+        # FastMCP public lifespan 触发。向量队列必须与 HTTP 一样纳入生命周期，
+        # 否则正文落盘后会退回同步索引，让慢 provider 拖住工具回包。
+        _stdio_runtime_lifecycle = RuntimeLifecycle(
+            logger=logger,
+            embedding_outbox=embedding_outbox,
+            boot_marker_path=os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                ".boot_fails",
+            ),
+        )
         mcp.run(transport=transport)
+    else:
+        # 2026-08-09 起 legacy SSE transport 已下线。这里必须显式拒绝、不能落到
+        # mcp.run(transport=transport) ——FastMCP 自带的 "sse" 字面量仍然合法，会
+        # 绕过 build_http_app 里的鉴权/CORS/CSRF/限流中间件，直接起一个不受 Ombre
+        # Brain 安全闸门保护的裸 SSE 服务，等于悄悄开一个没有认证的记忆读写口子。
+        logger.error(
+            f"不支持的 transport：{transport!r}。合法值仅 streamable-http、stdio；"
+            "legacy SSE 传输已下线，请改用 streamable-http 并更新 config.yaml / "
+            "OMBRE_TRANSPORT。"
+        )
+        raise SystemExit(1)

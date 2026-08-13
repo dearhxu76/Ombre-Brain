@@ -17,7 +17,7 @@ I 是 OB 的自我感知层，但它不是日记，是沉淀物。
   候选桶保留痕迹并标 i_stage="promoted" + resolved
 - 读取模式（read=True 或全空）：正式 I 条目 + 待沉淀候选清单；早期直写的
   历史条目显式标注「未经沉淀」
-- record_dream_pass()：dream 渲染完候选段后回调，按天去重记一次见证
+- record_dream_pass()：dream 渲染完所有可见候选后回调，按天去重记一次见证
 
 不做什么（边界）：
 - 不判断「矛盾 / 重复 / 该加权」——那是认知层，rule.md 第 5 条。系统只摆材料，
@@ -37,7 +37,9 @@ from datetime import datetime
 from typing import Optional
 
 from .. import _runtime as rt
-from .._common import check_content_size, check_metadata_size, stored_data_marker
+from .._common import check_content_size, check_metadata_size
+from ..plan.core import is_letter_bucket
+from errors import safe_error_detail
 
 _VALID_ASPECTS = {"nature", "values", "patterns", "limits", "becoming", "uncertainty", "stance"}
 
@@ -101,15 +103,21 @@ def _aspect_of(meta: dict) -> str:
     )
 
 
-def _dream_dates(meta: dict) -> list[str]:
+def dream_dates(meta: dict) -> list[str]:
+    """Return unique witness dates in their original order."""
     raw = meta.get("i_dream_dates") or []
     if isinstance(raw, str):
         raw = [raw]
     if not isinstance(raw, list):
         return []
-    return [str(d)[:10] for d in raw if str(d).strip()]
-
-
+    dates: list[str] = []
+    seen: set[str] = set()
+    for value in raw:
+        date = str(value).strip()[:10]
+        if date and date not in seen:
+            seen.add(date)
+            dates.append(date)
+    return dates
 def is_pending_candidate(bucket: dict) -> bool:
     """一条桶是否是「还在等待沉淀」的 I 候选。"""
     meta = bucket.get("metadata") or {}
@@ -141,14 +149,23 @@ async def _write_candidate(content: str, aspect: str) -> str:
             event_actor="llm",
         )
     except Exception as e:
-        return f"写入失败: {e}"
+        return f"写入失败: {safe_error_detail(e)}"
 
     try:
-        await rt.bucket_mgr.update(bucket_id, i_stage="candidate", i_dream_dates=[])
+        marked = await rt.bucket_mgr.update(
+            bucket_id, i_stage="candidate", i_dream_dates=[]
+        )
     except Exception as e:
         rt.logger.warning(f"I candidate stage marking failed for {bucket_id}: {e}")
         return (
-            f"⚠️ 候选已落盘（{bucket_id}），但候选状态标记失败：{e}。"
+            f"⚠️ 候选已落盘（{bucket_id}），但候选状态标记失败："
+            f"{safe_error_detail(e)}。"
+            "它现在是一条普通记忆，不会进入沉淀流程。"
+        )
+    if not marked:
+        rt.logger.warning("I candidate stage marking returned false for %s", bucket_id)
+        return (
+            f"⚠️ 候选已落盘（{bucket_id}），但候选状态标记失败。"
             "它现在是一条普通记忆，不会进入沉淀流程。"
         )
 
@@ -165,7 +182,7 @@ async def _promote_candidate(bucket_id: str, content_override: str) -> str:
     try:
         bucket = await rt.bucket_mgr.get(bucket_id)
     except Exception as e:
-        return f"读取失败: {e}"
+        return f"读取失败: {safe_error_detail(e)}"
     if not bucket:
         return f"找不到候选 {bucket_id}（可能已经衰减归档——那本身就是一种答案）。"
 
@@ -180,7 +197,7 @@ async def _promote_candidate(bucket_id: str, content_override: str) -> str:
             "自我认知要先写成「我觉得……」的候选，经过 dream 才可能沉淀。"
         )
 
-    dates = _dream_dates(meta)
+    dates = dream_dates(meta)
     if len(dates) < I_PROMOTE_THRESHOLD:
         missing = I_PROMOTE_THRESHOLD - len(dates)
         seen = "、".join(dates) if dates else "还没有"
@@ -215,7 +232,7 @@ async def _promote_candidate(bucket_id: str, content_override: str) -> str:
             event_actor="llm",
         )
     except Exception as e:
-        return f"沉淀失败: {e}"
+        return f"沉淀失败: {safe_error_detail(e)}"
 
     try:
         await rt.bucket_mgr.update(
@@ -264,11 +281,18 @@ async def record_dream_pass(bucket_ids: list) -> int:
             continue
         if not bucket or not is_pending_candidate(bucket):
             continue
-        dates = _dream_dates(bucket.get("metadata") or {})
+        dates = dream_dates(bucket.get("metadata") or {})
         if today in dates:
             continue
         try:
-            await rt.bucket_mgr.update(bucket_id, i_dream_dates=[*dates, today])
+            updated = await rt.bucket_mgr.update(
+                bucket_id, i_dream_dates=[*dates, today]
+            )
+            if not updated:
+                rt.logger.warning(
+                    "I dream pass write returned false for %s", bucket_id
+                )
+                continue
             recorded += 1
         except Exception as e:
             rt.logger.warning(f"I dream pass write failed for {bucket_id}: {e}")
@@ -279,13 +303,17 @@ async def _read_i(limit: int) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        return f"读取失败: {e}"
+        return f"读取失败: {safe_error_detail(e)}"
 
     i_buckets = [
         b for b in all_buckets
         if b.get("metadata", {}).get("type") == "i"
+        and not is_letter_bucket(b)
     ]
-    pending = [b for b in all_buckets if is_pending_candidate(b)]
+    pending = [
+        b for b in all_buckets
+        if is_pending_candidate(b) and not is_letter_bucket(b)
+    ]
 
     if not i_buckets and not pending:
         return "还没有任何自我认知记录，也没有正在沉淀的候选。"
@@ -307,18 +335,13 @@ async def _read_i(limit: int) -> str:
             # 早期条目是直接写进来的，没经过任何碰撞。标出来，别让它们
             # 和沉淀下来的东西看起来一样可靠。
             origin = (
-                f"（经 {len(_dream_dates(meta))} 次 dream 沉淀）"
+                f"（经 {len(dream_dates(meta))} 次 dream 沉淀）"
                 if meta.get("i_from_candidate")
                 else "（早期直接写入，未经沉淀）"
             )
             text = (b.get("content") or "").strip()
             payload = f"{ts} {aspect_label}{b['id']} {origin}\n{text}"
-            lines.append(
-                "\n"
-                + stored_data_marker(payload, provenance=f"I:{b['id']}")
-                + "\n"
-                + payload
-            )
+            lines.append("\n" + payload)
 
     if pending:
         pending.sort(
@@ -332,18 +355,13 @@ async def _read_i(limit: int) -> str:
             meta = b.get("metadata", {})
             aspect_tag = _aspect_of(meta)
             aspect_label = f"[{aspect_tag}] " if aspect_tag else ""
-            passes = len(_dream_dates(meta))
+            passes = len(dream_dates(meta))
             created = (meta.get("created") or "")[:10]
             text = (b.get("content") or "").strip()
             payload = (
                 f"{created} {aspect_label}{b['id']} "
                 f"（{passes}/{I_PROMOTE_THRESHOLD} 次 dream）\n{text}"
             )
-            lines.append(
-                "\n"
-                + stored_data_marker(payload, provenance=f"I_candidate:{b['id']}")
-                + "\n"
-                + payload
-            )
+            lines.append("\n" + payload)
 
     return "\n".join(lines)

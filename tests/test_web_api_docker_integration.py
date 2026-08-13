@@ -5,11 +5,17 @@ password setup in an isolated Docker volume. It never targets a user vault.
 """
 
 import os
-import json
+import re
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
+
+
+def _bucket_id(text: str) -> str:
+    match = re.search(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", text)
+    assert match, text
+    return match.group(0)
 
 
 def _configured_base_url() -> str:
@@ -130,7 +136,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
             "/api/letter",
             json={
                 "author": "user",
-                "user_name": "江乔生",
+                "user_name": "李四",
                 "content": human_secret,
                 "title": human_title,
                 "lock_type": "permanent",
@@ -190,7 +196,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
             "arguments": {"limit": 20},
         })
         ai_read_text = ai_read["result"]["content"][0]["text"]
-        assert "江乔生" in ai_read_text
+        assert "李四" in ai_read_text
         assert human_secret not in ai_read_text
         assert human_title not in ai_read_text
 
@@ -206,19 +212,20 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
             },
         })
         ai_receipt_text = ai_write["result"]["content"][0]["text"]
-        ai_receipt = json.loads(ai_receipt_text)
+        ai_letter_id = _bucket_id(ai_receipt_text)
+        assert "🔒permanent" in ai_receipt_text
         assert ai_secret not in ai_receipt_text and ai_title not in ai_receipt_text
 
         dashboard_letters = client.get("/api/letters").json()["letters"]
-        ai_item = next(item for item in dashboard_letters if item["id"] == ai_receipt["letter_id"])
+        ai_item = next(item for item in dashboard_letters if item["id"] == ai_letter_id)
         assert ai_item["locked"] is True
-        assert ai_item["writer_name"] == "周家明"
+        assert ai_item["writer_name"] == "张三"
         assert "content" not in ai_item and "title" not in ai_item
         assert client.patch(
-            f"/api/letter/{ai_receipt['letter_id']}", json={"lock_type": "none"}
+            f"/api/letter/{ai_letter_id}", json={"lock_type": "none"}
         ).status_code == 403
         assert client.patch(
-            f"/api/letter/{ai_receipt['letter_id']}", json={"content": "must-not-apply"}
+            f"/api/letter/{ai_letter_id}", json={"content": "must-not-apply"}
         ).status_code == 403
 
         # A newer ordinary Letter must not suppress the independent notice for
@@ -231,7 +238,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
 
         dashboard_hook = client.get("/breath-hook")
         assert dashboard_hook.status_code == 200
-        assert "周家明给你留了一封永久锁信" in dashboard_hook.text
+        assert "张三给你留了一封永久锁信" in dashboard_hook.text
         assert ai_secret not in dashboard_hook.text and ai_title not in dashboard_hook.text
 
         if HOOK_TOKEN:
@@ -239,7 +246,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
                 "/breath-hook", headers={"X-Ombre-Hook-Token": HOOK_TOKEN}
             )
             assert ai_hook.status_code == 200
-            assert "江乔生给你留了一封永久锁信" in ai_hook.text
+            assert "李四给你留了一封永久锁信" in ai_hook.text
             assert edited_human_secret not in ai_hook.text
             assert edited_human_title not in ai_hook.text
 

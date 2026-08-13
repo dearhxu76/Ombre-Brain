@@ -177,7 +177,7 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 
 `entrypoint.sh` 本身来自镜像，不在 Dashboard 热更新覆盖范围内。升级到带有新播种逻辑的版本时必须先拉取/重建镜像一次，不能只点击 Dashboard 更新。
 
-Dashboard 热更新会限制下载包、成员数、单文件大小、总解压量和压缩率。建立 `_prev` 回滚点失败时不会继续覆盖；逐文件写入采用原子替换。依赖变化以正式发布使用的 `requirements.lock.txt` 为准，旧更新包缺少锁文件时才回退 `requirements.txt`；真实依赖变化且未显式开启 `OMBRE_UPDATE_ALLOW_PIP=1` 时，热更新会回滚并要求重建镜像，避免“代码更新成功但重启后缺包”。
+Dashboard 热更新会限制下载包、成员数、单文件大小、总解压量和压缩率。建立 `_prev` 回滚点失败时不会继续覆盖；逐文件写入采用原子替换。依赖变化以正式发布使用的 `requirements.lock.txt` 为准，旧更新包缺少锁文件时才回退 `requirements.txt`；真实依赖变化且未显式开启 `OMBRE_UPDATE_ALLOW_PIP=1`（或 Dashboard 「热更新」面板里的等效开关）时，热更新会在写入任何文件前直接拒绝并要求重建镜像，避免”代码更新成功但重启后缺包”——2.16.2 起这道检查提前到下载/解析完依赖清单之后、真正覆盖 src/frontend 之前，不会再出现”先备份写文件、再整体回滚”的多余一轮。
 
 已经停留在 2.8.4、且出现“新版依赖清单有变化”回滚提示的实例，可以直接重新点击官方 `main` 热更新。官方 GitHub 归档通过 `.gitattributes` 排除仅供开发者使用的宽松 `requirements.txt`，同时保留带 hash 的 `requirements.lock.txt`；旧更新器会跳过错误的源清单比较，新更新器接管后则继续按发布锁判断。自建镜像/镜像站若重新打包了根级 `requirements.txt`，仍应重建镜像，或仅在明确理解风险时临时设置 `OMBRE_UPDATE_ALLOW_PIP=1`。
 

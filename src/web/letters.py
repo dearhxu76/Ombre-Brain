@@ -19,7 +19,10 @@ from . import _shared as sh
 from tools._common import check_content_size, check_metadata_size
 from tools.plan.core import (
     author_side,
+    is_letter_bucket,
+    letter_lock_revision,
     letter_lock_state,
+    normalize_expired_lock,
     normalize_lock_type,
     normalize_unlock_date,
     resolve_writer_name,
@@ -62,7 +65,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": metadata_error}, status_code=400)
         try:
             all_b = await sh.bucket_mgr.list_all(include_archive=False)
-            letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
+            letters = [b for b in all_b if is_letter_bucket(b)]
             if author:
                 af_low = author.lower()
                 if af_low == "user":
@@ -76,14 +79,23 @@ def register(mcp) -> None:
                 key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""),
                 reverse=True,
             )
+            store = getattr(sh, "deletion_requests", None)
+            deletion_statuses = store.status_snapshot() if store else {}
             result = []
             for b in letters:
                 state = letter_lock_state(b, "human")
                 if state["expired"]:
-                    await sh.bucket_mgr.update(
-                        b["id"], lock_type="none", unlock_date=None
+                    b, state = await normalize_expired_lock(
+                        b,
+                        state,
+                        "human",
+                        bucket_mgr=sh.bucket_mgr,
                     )
-                result.append(safe_letter_metadata(b, "human"))
+                    if not b:
+                        continue
+                item = safe_letter_metadata(b, "human")
+                item["deletion_request"] = deletion_statuses.get(str(b["id"]))
+                result.append(item)
             return JSONResponse({"letters": result, "total": len(result)})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -228,8 +240,9 @@ def register(mcp) -> None:
             return err
         letter_id = request.path_params["letter_id"]
         bucket = await sh.bucket_mgr.get(letter_id)
-        if not bucket or bucket["metadata"].get("type") != "letter":
+        if not bucket or not is_letter_bucket(bucket):
             return JSONResponse({"error": "letter not found"}, status_code=404)
+        expected_lock_state = letter_lock_revision(bucket)
         try:
             body = await sh._read_json_object(request)
         except Exception:
@@ -237,16 +250,74 @@ def register(mcp) -> None:
 
         content_fields = {"content", "title", "author", "user_name", "date"}
         lock_fields = {"lock_type", "unlock_date"}
+        conversion_fields = {"convert_to_lockable"}
         has_content_edit = bool(content_fields.intersection(body))
         has_lock_edit = bool(lock_fields.intersection(body))
-        if has_content_edit and has_lock_edit:
+        has_conversion = bool(conversion_fields.intersection(body))
+        if sum((has_content_edit, has_lock_edit, has_conversion)) > 1:
             return JSONResponse({
-                "error": "正文编辑与锁管理必须分开提交"
+                "error": "正文编辑、锁管理与历史格式转换必须分开提交"
             }, status_code=400)
-        if not has_content_edit and not has_lock_edit:
+        if not has_content_edit and not has_lock_edit and not has_conversion:
             return JSONResponse({"error": "nothing to update"}, status_code=400)
 
         state = letter_lock_state(bucket, "human")
+        if has_conversion:
+            if body.get("convert_to_lockable") is not True:
+                return JSONResponse({
+                    "error": "convert_to_lockable must be true"
+                }, status_code=400)
+            if state["locked_by"]:
+                return JSONResponse({
+                    "error": "这封 Letter 已有可信锁所有者，不能重新分配"
+                }, status_code=409)
+            if state["stored_lock_type"] != "none":
+                return JSONResponse({
+                    "error": "只有当前公开且从未建立可信锁所有权的历史 Letter 可以转换"
+                }, status_code=409)
+            # ai_name：本次转换请求显式传入优先（Dashboard 在 AI_NAME 未配置时会
+            # 弹窗让用户当场填一个，只用于这一次转换，不改全局配置），否则回退
+            # 环境变量 AI_NAME——与 letter_write 创建带锁 Letter 的取值顺序一致。
+            explicit_ai_name = str(body.get("ai_name") or "").strip()
+            ai_writer_name = resolve_writer_name(
+                "ai", author="", ai_name=explicit_ai_name or get_ai_name()
+            )
+            if not ai_writer_name:
+                return JSONResponse({
+                    "error": (
+                        "无法转换历史 Letter：未能从现有 AI_NAME 取得当前 AI 的实际关系名。"
+                        "请先完善现有名称配置。"
+                    )
+                }, status_code=400)
+            try:
+                ok = await sh.bucket_mgr.update(
+                    letter_id,
+                    locked_by="ai",
+                    lock_owner_source="legacy_ai_conversion",
+                    writer_name=ai_writer_name,
+                    lock_type="none",
+                    unlock_date=None,
+                    expected_lock_state=expected_lock_state,
+                )
+                if not ok:
+                    latest = await sh.bucket_mgr.get(letter_id)
+                    if latest and letter_lock_revision(latest) != expected_lock_state:
+                        return JSONResponse(
+                            {"error": "letter lock changed concurrently"},
+                            status_code=409,
+                        )
+                    return JSONResponse({"error": "conversion failed"}, status_code=500)
+                return JSONResponse({
+                    "ok": True,
+                    "id": letter_id,
+                    "converted": True,
+                    "lock_type": "none",
+                    "locked_by": "ai",
+                    "writer_name": ai_writer_name,
+                })
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
+
         if has_content_edit:
             # The Dashboard keeps its historical editing behavior.  The only
             # additional boundary is that an incoming, still-locked Letter
@@ -279,8 +350,18 @@ def register(mcp) -> None:
             if not updates:
                 return JSONResponse({"error": "nothing to update"}, status_code=400)
             try:
-                ok = await sh.bucket_mgr.update(letter_id, **updates)
+                ok = await sh.bucket_mgr.update(
+                    letter_id,
+                    expected_lock_state=expected_lock_state,
+                    **updates,
+                )
                 if not ok:
+                    latest = await sh.bucket_mgr.get(letter_id)
+                    if latest and letter_lock_revision(latest) != expected_lock_state:
+                        return JSONResponse(
+                            {"error": "letter lock changed concurrently"},
+                            status_code=409,
+                        )
                     return JSONResponse({"error": "update failed"}, status_code=500)
                 if "content" in updates:
                     try:
@@ -323,8 +404,18 @@ def register(mcp) -> None:
         updates = {"lock_type": lock_type, "unlock_date": unlock_date}
 
         try:
-            ok = await sh.bucket_mgr.update(letter_id, **updates)
+            ok = await sh.bucket_mgr.update(
+                letter_id,
+                expected_lock_state=expected_lock_state,
+                **updates,
+            )
             if not ok:
+                latest = await sh.bucket_mgr.get(letter_id)
+                if latest and letter_lock_revision(latest) != expected_lock_state:
+                    return JSONResponse(
+                        {"error": "letter lock changed concurrently"},
+                        status_code=409,
+                    )
                 return JSONResponse({"error": "update failed"}, status_code=500)
             return JSONResponse({
                 "ok": True,
@@ -348,34 +439,19 @@ def register(mcp) -> None:
             return JSONResponse({"error": "confirm=true required for delete-to-archive"}, status_code=400)
         letter_id = request.path_params["letter_id"]
         bucket = await sh.bucket_mgr.get(letter_id)
-        if bucket and bucket["metadata"].get("type") != "letter":
+        if bucket and not is_letter_bucket(bucket):
             return JSONResponse({"error": "letter not found"}, status_code=404)
         try:
-            # Idempotent repair for a half-deleted letter: the Markdown file may
-            # already be gone while the active cache/vector still exposes it.
-            # Archive a real letter when present, then independently clean every
-            # derived layer even when no file remains.
-            archived = bool(bucket) and await sh.bucket_mgr.delete(letter_id)
-            if bucket and not archived:
-                return JSONResponse({"error": "letter archive failed"}, status_code=500)
-            outbox = getattr(sh.bucket_mgr, "embedding_outbox", None)
-            if outbox is not None:
-                try:
-                    outbox.discard(letter_id)
-                except Exception:
-                    pass
             try:
-                sh.embedding_engine.delete_embedding(letter_id)
+                body = await sh._read_json_object(request)
             except Exception:
-                pass
-            invalidate = getattr(sh.bucket_mgr, "_invalidate_bm25", None)
-            if callable(invalidate):
-                invalidate()
-            return JSONResponse({
-                "ok": True,
-                "deleted": archived,
-                "cleaned": True,
-                "already_missing": not bool(bucket),
-            })
+                body = {}
+            result = await sh.deletion_requests.submit(
+                letter_id, body.get("reason", ""), is_letter=True
+            )
+            if not result.get("ok"):
+                status = 404 if result.get("code") == "not_found" else 409 if result.get("code") in {"pending_exists", "daily_limit", "lifetime_limit"} else 400
+                return JSONResponse(result, status_code=status)
+            return JSONResponse(result)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)

@@ -1,5 +1,9 @@
 # ADR-0002: Spark 只读灵感候选边界
 
+> **该功能已于 2026-08-11 下线**：Spark（`dream(inspiration=True)`、`tools/spark_r1/`、
+> `tools/spark_pilot/`、`tools/spark_shadow/` 及对应 `evaluate_spark*.py`）已连同代码与测试
+> 一并从代码库移除。本文档仅作历史存档保留，不再描述现役功能。
+
 ## Status
 
 `Accepted`，提出与接受日期均为 2026-07-30。

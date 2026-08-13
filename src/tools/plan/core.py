@@ -34,9 +34,9 @@ from .._common import (
     check_content_size,
     check_metadata_size,
     check_query_size,
-    stored_data_marker,
 )
 from utils import strip_wikilinks, get_ai_name, get_owner_name
+from errors import safe_error_detail
 
 
 LETTER_LOCK_TYPES = {"none", "timed", "permanent"}
@@ -93,7 +93,7 @@ def author_side(author: object, *, ai_name: str | None = None) -> str | None:
 
 
 def resolve_writer_name(
-    caller_side: str,
+    caller_side: str | None,
     *,
     author: object,
     user_name: object = "",
@@ -105,6 +105,39 @@ def resolve_writer_name(
     else:
         candidates = (ai_name, get_ai_name(), raw_author)
     return next((str(v).strip() for v in candidates if _is_actual_relation_name(v)), None)
+
+
+def is_letter_bucket(bucket: dict) -> bool:
+    """生命周期改写存储类型后，仍能识别逻辑上的 Letter。"""
+    meta = bucket.get("metadata") or {}
+    if not isinstance(meta, dict):
+        return False
+    if str(meta.get("type") or "").strip().casefold() == "letter":
+        return True
+    if str(meta.get("source_tool") or "").strip().casefold() == "letter":
+        return True
+    tags = meta.get("tags") or []
+    if isinstance(tags, str):
+        tags = [part.strip() for part in tags.split(",")]
+    if isinstance(tags, (list, tuple, set)) and "__letter__" in tags:
+        return True
+    return (
+        str(meta.get("locked_by") or "").strip() in {"human", "ai"}
+        and str(meta.get("lock_type") or "").strip().casefold()
+        in {"timed", "permanent"}
+    )
+
+
+def letter_lock_revision(bucket: dict) -> tuple[str, str, str]:
+    """返回可用于原子写入前置校验的锁字段快照。"""
+    meta = bucket.get("metadata") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    return (
+        str(meta.get("lock_type") or "").strip().casefold(),
+        str(meta.get("unlock_date") or "").strip(),
+        str(meta.get("locked_by") or "").strip().casefold(),
+    )
 
 
 def letter_lock_state(bucket: dict, caller_side: str | None, *, now: datetime | None = None) -> dict:
@@ -136,10 +169,34 @@ def letter_lock_state(bucket: dict, caller_side: str | None, *, now: datetime | 
     }
 
 
-async def normalize_expired_lock(bucket: dict, state: dict) -> None:
+async def normalize_expired_lock(
+    bucket: dict,
+    state: dict,
+    caller_side: str | None,
+    *,
+    bucket_mgr=None,
+) -> tuple[dict | None, dict]:
     if not state.get("expired"):
-        return
-    await rt.bucket_mgr.update(bucket["id"], lock_type="none", unlock_date=None)
+        return bucket, state
+    manager = bucket_mgr or rt.bucket_mgr
+    try:
+        committed = await manager.update(
+            bucket["id"],
+            lock_type="none",
+            unlock_date=None,
+            expected_lock_state=letter_lock_revision(bucket),
+        )
+        get_bucket = getattr(manager, "get", None)
+        latest = await get_bucket(bucket["id"]) if callable(get_bucket) else None
+    except Exception:
+        return None, state
+    if latest is None and committed:
+        # 极简兼容 manager 可能没有 get()；正式 BucketManager 始终走上面的
+        # 原子前置校验和回读路径。
+        latest = bucket
+    if not latest:
+        return None, state
+    return latest, letter_lock_state(latest, caller_side)
 
 
 def safe_letter_metadata(bucket: dict, caller_side: str | None) -> dict:
@@ -157,6 +214,10 @@ def safe_letter_metadata(bucket: dict, caller_side: str | None) -> dict:
         "unlock_date": state["unlock_date"],
         "locked": state["locked"],
         "lock_owner": state["owner"],
+        "lock_upgrade_available": (
+            state["locked_by"] is None
+            and state["stored_lock_type"] == "none"
+        ),
     }
     if not state["locked"]:
         payload["title"] = meta.get("title", "") or meta.get("name", "")
@@ -233,7 +294,7 @@ async def plan_create(
         event_actor="llm",
     )
     from .._common import append_plan_change_log
-    initial_log = append_plan_change_log([], "created", to=status)
+    initial_log = append_plan_change_log([], "created", to=status, by="plan")
     update_kwargs = {"status": status, "change_log": initial_log}
     if related_bucket.strip():
         update_kwargs["related_bucket"] = related_bucket.strip()
@@ -354,15 +415,10 @@ async def letter_write(
     # 注意：bucket_mgr.create() 已在 content 落盘后投递 embedding outbox
     # 向量，这里不需要也不应该重复调用 generate_and_store。
     if normalized_lock != "none":
-        created_bucket = await rt.bucket_mgr.get(bucket_id)
-        created_at = ((created_bucket or {}).get("metadata") or {}).get("created", "")
-        return json.dumps({
-            "letter_id": bucket_id,
-            "created_at": created_at,
-            "lock_type": normalized_lock,
-            "unlock_date": normalized_unlock,
-            "stored": True,
-        }, ensure_ascii=False, separators=(",", ":"))
+        lock_suffix = f" 🔒{normalized_lock}"
+        if normalized_unlock:
+            lock_suffix += f" 解锁:{normalized_unlock}"
+        return f"💌letter→{bucket_id} [{a}]{lock_suffix}"
     return f"💌letter→{bucket_id} [{a}]"
 
 
@@ -375,42 +431,56 @@ async def letter_lock_update(
 ) -> str:
     """Change only lock metadata; caller identity is supplied by trusted entrypoints."""
     if not letter_id or not letter_id.strip():
-        return "letter_id is required"
+        return "letter_id 不能为空"
     try:
         normalized_lock = normalize_lock_type(lock_type)
         normalized_unlock = normalize_unlock_date(normalized_lock, unlock_date)
     except ValueError as exc:
         return f"无法修改 Letter 锁：{exc}"
     bucket = await rt.bucket_mgr.get(letter_id.strip())
-    if not bucket or (bucket.get("metadata") or {}).get("type") != "letter":
-        return "Letter not found"
+    if not bucket or not is_letter_bucket(bucket):
+        return "未找到该 Letter"
     state = letter_lock_state(bucket, caller_side)
     if not state["locked_by"]:
         return "历史无锁 Letter 没有锁所有者，不能通过锁管理入口补设锁。请新写一封带锁 Letter。"
     if not state["owner"]:
         return "只有创建这把锁的一方可以修改 Letter 锁状态。"
-    claimed_side = author_side((bucket.get("metadata") or {}).get("author"))
-    if normalized_lock != "none" and claimed_side and claimed_side != caller_side:
+    meta = bucket.get("metadata") or {}
+    claimed_side = author_side(meta.get("author"))
+    legacy_ai_conversion = (
+        meta.get("lock_owner_source") == "legacy_ai_conversion"
+        and state["locked_by"] == "ai"
+    )
+    if (
+        normalized_lock != "none"
+        and claimed_side
+        and claimed_side != caller_side
+        and not legacy_ai_conversion
+    ):
         return "无法上锁：这封无锁 Letter 的署名方向与当前可信入口不一致；代存信不能事后转换为锁信。"
-    writer_name = str((bucket.get("metadata") or {}).get("writer_name") or "").strip()
+    writer_name = str(meta.get("writer_name") or "").strip()
     if normalized_lock != "none" and not _is_actual_relation_name(writer_name):
         return "无法上锁：这封 Letter 创建时没有记录实际关系名，请新写一封带锁 Letter。"
     updates = {
         "lock_type": normalized_lock,
         "unlock_date": normalized_unlock,
     }
+    expected_lock_state = letter_lock_revision(bucket)
     ok = await rt.bucket_mgr.update(
         bucket["id"],
+        expected_lock_state=expected_lock_state,
         **updates,
     )
     if not ok:
+        latest = await rt.bucket_mgr.get(bucket["id"])
+        if latest and letter_lock_revision(latest) != expected_lock_state:
+            return "Letter 锁状态已被并发修改，请重新读取后再试"
         return "Letter 锁状态修改失败"
-    return json.dumps({
-        "letter_id": bucket["id"],
-        "lock_type": normalized_lock,
-        "unlock_date": normalized_unlock,
-        "updated": True,
-    }, ensure_ascii=False, separators=(",", ":"))
+    if normalized_lock == "none":
+        return f"🔓 已解锁 {bucket['id']}，恢复默认可读。"
+    if normalized_lock == "permanent":
+        return f"🔒 已将 {bucket['id']} 设为永久锁。"
+    return f"🔒 已将 {bucket['id']} 设为定时锁，解锁日期：{normalized_unlock}。"
 
 
 async def letter_read(
@@ -447,11 +517,17 @@ async def letter_read(
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        return f"读取信件失败: {e}"
-    letters = [b for b in all_b if b["metadata"].get("type") == "letter"]
-    states = {b["id"]: letter_lock_state(b, "ai") for b in letters}
-    for bucket in letters:
-        await normalize_expired_lock(bucket, states[bucket["id"]])
+        return f"读取信件失败: {safe_error_detail(e)}"
+    normalized_letters = []
+    states = {}
+    for bucket in (b for b in all_b if is_letter_bucket(b)):
+        state = letter_lock_state(bucket, "ai")
+        bucket, state = await normalize_expired_lock(bucket, state, "ai")
+        if not bucket:
+            continue
+        normalized_letters.append(bucket)
+        states[bucket["id"]] = state
+    letters = normalized_letters
     visible_letters = [b for b in letters if not states[b["id"]]["locked"]]
     af = author.strip()
     if af:
@@ -547,9 +623,5 @@ async def letter_read(
             f"[{b['id']}] {a} · {d}{(' · ' + title) if title else ''}\n"
             + strip_wikilinks(b["content"])
         )
-        parts.append(
-            stored_data_marker(payload, provenance=f"letter:{b['id']}")
-            + "\n"
-            + payload
-        )
+        parts.append(payload)
     return "=== 信件 ===\n" + "\n\n---\n\n".join(parts)

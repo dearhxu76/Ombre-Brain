@@ -174,9 +174,8 @@ surfacing:
     temperature: 0.7              # >1 更平均、<1 更偏向高分；0.7 是个温和的默认
 
 # --- Limits / 边界限制（iter 1.6 §5）---
-# Single-bucket size cap and pinned bucket quota. Exceeding either is
-# rejected at hold/grow/trace boundaries with a Chinese hint string.
-# 单桶字节上限 + pinned 桶数量上限。超出时在 hold/grow/trace 入口直接拒绝。
+# 单桶字节上限 + pinned/protected 独立配额。显式设为 protected
+# 时如配额已满，trace 会直接拒绝，不部分落盘。
 limits:
   max_bucket_bytes: 51200         # 50KB; 0 disables check
   max_import_upload_bytes: 67108864  # 64MB conversation import request cap
@@ -187,6 +186,7 @@ limits:
   max_metadata_bytes: 16384       # combined tool metadata/filter cap; 0 disables
   max_grow_items: 100             # pre-split/digest item count cap; 0 disables
   max_pinned: 20                  # max pinned buckets; 0 disables check
+  max_protected: 20               # protected 桶上限；0 关闭检查
 
 # --- iter 1.9 G: 桶类型默认值 / per-type frontmatter defaults ---
 # Applied at create() time only when caller doesn't pass that field.
