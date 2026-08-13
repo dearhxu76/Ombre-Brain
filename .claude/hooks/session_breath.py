@@ -27,7 +27,19 @@ import sys
 import urllib.request
 import urllib.error
 
+
+def _configure_stream_utf8(stream):
+    """Make redirected Windows hook output safe for arbitrary memory text."""
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, OSError, ValueError):
+        pass
+
+
 def main():
+    _configure_stream_utf8(sys.stdout)
+    _configure_stream_utf8(sys.stderr)
+
     # Allow disabling the hook via env var
     if os.environ.get("OMBRE_HOOK_SKIP") == "1":
         sys.exit(0)
