@@ -5,6 +5,7 @@ import threading
 
 import pytest
 
+from tools import _runtime as tools_runtime
 from utils import count_tokens_approx
 from web import hooks
 
@@ -77,8 +78,33 @@ class _Manager:
                 bucket["metadata"][key] = value
         return True
 
+    def footprint_snapshot(self):
+        class _Snapshot:
+            @staticmethod
+            def summary(_bucket_id, _metadata=None):
+                return ""
+
+        return _Snapshot()
+
+    async def get_stats(self):
+        return {
+            "permanent_count": sum(
+                1 for item in self.buckets
+                if item["metadata"].get("type") == "permanent"
+            ),
+            "dynamic_count": sum(
+                1 for item in self.buckets
+                if item["metadata"].get("type") == "dynamic"
+            ),
+        }
+
 
 class _Decay:
+    is_running = True
+
+    async def ensure_started(self):
+        return None
+
     @staticmethod
     def calculate_score(metadata):
         return float(metadata.get("importance", 0))
@@ -91,6 +117,14 @@ class _EchoDehydrator:
     async def dehydrate(self, content, _metadata):
         self.calls += 1
         return content
+
+
+class _DeletionStore:
+    def __init__(self, body):
+        self.body = body
+
+    async def render_pending_batch(self):
+        return self.body
 
 
 def _bucket(bucket_id, content, **metadata):
@@ -121,16 +155,34 @@ def _hook_runtime(monkeypatch):
         return None
 
     monkeypatch.setattr(hooks.sh, "fire_webhook", fire_webhook, raising=False)
+    monkeypatch.setattr(hooks.sh, "deletion_requests", None, raising=False)
 
 
 def _handler(monkeypatch, buckets, dehydrator, hook_config=None):
+    config = {
+        "hooks": {"token": "secret", **(hook_config or {})},
+        "surfacing": {},
+    }
     monkeypatch.setattr(
         hooks.sh,
         "config",
-        {"hooks": {"token": "secret", **(hook_config or {})}},
+        config,
     )
-    monkeypatch.setattr(hooks.sh, "bucket_mgr", _Manager(buckets), raising=False)
+    manager = _Manager(buckets)
+    decay = _Decay()
+    monkeypatch.setattr(hooks.sh, "bucket_mgr", manager, raising=False)
     monkeypatch.setattr(hooks.sh, "dehydrator", dehydrator, raising=False)
+    monkeypatch.setattr(tools_runtime, "config", config)
+    monkeypatch.setattr(tools_runtime, "bucket_mgr", manager)
+    monkeypatch.setattr(tools_runtime, "decay_engine", decay)
+    monkeypatch.setattr(tools_runtime, "dehydrator", dehydrator)
+    monkeypatch.setattr(tools_runtime, "deletion_requests", None)
+    monkeypatch.setattr(tools_runtime, "logger", hooks.logger)
+    monkeypatch.setattr(tools_runtime, "fire_webhook", None)
+    monkeypatch.setattr(tools_runtime, "mark_op", None)
+    monkeypatch.setattr(
+        tools_runtime, "record_v3_tool_event", lambda *_args, **_kwargs: None
+    )
     mcp = _MCP()
     hooks.register(mcp)
     return mcp.routes[("GET", "/breath-hook")]
@@ -171,7 +223,7 @@ async def test_hook_hides_digested_core_and_ordinary_memories(monkeypatch):
     assert "Visible ordinary memory" in text
     assert "Digested core memory" not in text
     assert "Digested ordinary memory" not in text
-    assert dehydrator.calls == 2
+    assert dehydrator.calls == 0
 
 
 @pytest.mark.asyncio
@@ -200,7 +252,7 @@ async def test_hook_never_injects_protected_dynamic_or_permanent_memory(monkeypa
     assert "可见的 pinned 核心准则" in text
     assert "动态 protected 正文不得" not in text
     assert "permanent 也不能绕过" not in text
-    assert dehydrator.calls == 1
+    assert dehydrator.calls == 0
 
 
 @pytest.mark.asyncio
@@ -432,65 +484,126 @@ async def test_public_hook_never_receives_locked_letter_content_or_notice(monkey
 
 
 @pytest.mark.asyncio
-async def test_hook_caps_provider_calls_and_final_render_budget(monkeypatch):
+async def test_only_token_authenticated_ai_receives_pending_deletion_batch(monkeypatch):
+    pending = "AI-only pending deletion decision"
+    monkeypatch.setattr(
+        hooks.sh, "deletion_requests", _DeletionStore(pending), raising=False
+    )
+    handler = _handler(
+        monkeypatch,
+        [_bucket("ordinary", "ordinary visible memory")],
+        _EchoDehydrator(),
+    )
+
+    ai_text = (await handler(_Request())).body.decode("utf-8")
+    assert pending in ai_text
+
+    monkeypatch.setattr(hooks.sh, "_is_authenticated", lambda request: True)
+    human_text = (await handler(_Request(token=""))).body.decode("utf-8")
+    assert pending not in human_text
+
+    monkeypatch.setenv("OMBRE_HOOK_ALLOW_PUBLIC", "1")
+    monkeypatch.setattr(hooks.sh, "_is_authenticated", lambda request: False)
+    public_text = (await handler(_Request(token=""))).body.decode("utf-8")
+    assert pending not in public_text
+
+
+@pytest.mark.asyncio
+async def test_hook_reuses_live_breath_defaults_without_provider_calls(monkeypatch):
     dehydrator = _EchoDehydrator()
-    # hook 的 max_tokens 有 500 的配置下限（setting_int 的 minimum），OBM2
-    # 边界/哈希/协议说明整体删除后单条渲染成本大幅下降，短正文已经不足以在
-    # 500 token 内让预算先于 max_dehydrate_calls 生效——改用更长的正文，
-    # 让「预算」和「调用数上限」两条边界在这个配置下都仍然真实可验证。
-    long_memory = ("memory content that is long enough to cost real tokens. " * 6).strip()
     buckets = [
-        _bucket(f"core-{index}", long_memory, pinned=True, importance=10)
+        _bucket(f"memory-{index}", f"memory body {index}", importance=10 - index)
         for index in range(30)
     ]
-    max_tokens = 500
+    handler = _handler(monkeypatch, buckets, dehydrator)
+    tools_runtime.config["surfacing"] = {
+        "breath_max_results": 24,
+        "breath_max_tokens": 20000,
+    }
+
+    response = await handler(_Request())
+    text = response.body.decode("utf-8")
+
+    assert response.status_code == 200
+    assert dehydrator.calls == 0
+    assert text.count("[bucket_id:") == 24
+    assert count_tokens_approx(text) <= 20000
+    _assert_no_markers(text)
+
+
+@pytest.mark.asyncio
+async def test_session_start_does_not_record_a_fake_mcp_breath_event(monkeypatch):
+    recorded = []
+    handler = _handler(
+        monkeypatch,
+        [_bucket("ordinary", "ordinary visible memory")],
+        _EchoDehydrator(),
+    )
+    monkeypatch.setattr(
+        tools_runtime,
+        "record_v3_tool_event",
+        lambda *args, **kwargs: recorded.append((args, kwargs)),
+    )
+
+    response = await handler(_Request())
+
+    assert response.status_code == 200
+    assert recorded == []
+
+
+@pytest.mark.asyncio
+async def test_hook_bounds_session_start_extras_without_truncating_blocks(monkeypatch):
+    letter_body = "LETTER_BLOCK_" + ("信" * 400)
+    self_body = "SELF_BLOCK_" + ("我" * 300)
+    buckets = [
+        _bucket("ordinary", "ordinary visible memory"),
+        _bucket("letter", letter_body, type="letter", author="user"),
+        _bucket("self", self_body, type="i", tags=["__i__", "aspect:nature"]),
+    ]
     response = await _handler(
         monkeypatch,
         buckets,
-        dehydrator,
-        {"max_dehydrate_calls": 20, "max_tokens": max_tokens},
+        _EchoDehydrator(),
+        {"extras_max_tokens": 200},
     )(_Request())
     text = response.body.decode("utf-8")
 
     assert response.status_code == 200
-    assert dehydrator.calls < 20
-    assert count_tokens_approx(text) <= max_tokens
-    _assert_no_markers(text)
-    # EchoDehydrator 原样返回正文，每条渲染出的核心准则摘要都带着这句原文；
-    # 出现次数应与实际发起的打标调用数一致。
-    assert text.count(long_memory) == dehydrator.calls
+    assert "ordinary visible memory" in text
+    assert "LETTER_BLOCK_" not in text
+    assert "SELF_BLOCK_" not in text
+    assert count_tokens_approx(text) <= 10200
 
 
 @pytest.mark.asyncio
 async def test_hook_rejects_third_concurrent_provider_job(monkeypatch):
-    class BlockingDehydrator:
-        def __init__(self):
-            self.calls = 0
-            self.entered = asyncio.Event()
-            self.release = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
 
-        async def dehydrate(self, content, _metadata):
-            self.calls += 1
-            if self.calls == 2:
-                self.entered.set()
-            await self.release.wait()
-            return content
+    async def blocking_dispatch(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            entered.set()
+        await release.wait()
+        return "memory"
 
-    dehydrator = BlockingDehydrator()
+    monkeypatch.setattr(hooks._t_breath, "surface_default_memories", blocking_dispatch)
     handler = _handler(
         monkeypatch,
         [_bucket("core", "memory", pinned=True)],
-        dehydrator,
+        _EchoDehydrator(),
     )
     first = asyncio.create_task(handler(_Request(source="one")))
     second = asyncio.create_task(handler(_Request(source="two")))
-    await asyncio.wait_for(dehydrator.entered.wait(), timeout=2)
+    await asyncio.wait_for(entered.wait(), timeout=2)
 
     rejected = await handler(_Request(source="three"))
     assert rejected.status_code == 429
     assert rejected.headers["retry-after"] == "5"
 
-    dehydrator.release.set()
+    release.set()
     assert (await first).status_code == 200
     assert (await second).status_code == 200
 

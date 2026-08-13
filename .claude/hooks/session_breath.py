@@ -18,6 +18,8 @@
 #                      环境变量 OMBRE_HOOK_TOKEN；未设置时走 Dashboard 登录态
 #                      （本地已登录的浏览器 cookie 场景），公网自托管强烈建议设置
 #   OMBRE_HOOK_SKIP  — set to "1" to disable the hook temporarily
+#   OMBRE_HOOK_TIMEOUT — HTTP timeout in seconds (default: 25; keep below
+#                        Claude Code's SessionStart command timeout)
 # ============================================================
 
 import os
@@ -32,12 +34,17 @@ def main():
 
     base_url = os.environ.get("OMBRE_HOOK_URL", "http://localhost:18001").rstrip("/")
     token = os.environ.get("OMBRE_HOOK_TOKEN", "").strip()
+    try:
+        timeout = float(os.environ.get("OMBRE_HOOK_TIMEOUT", "25"))
+    except (TypeError, ValueError):
+        timeout = 25.0
+    timeout = max(1.0, min(timeout, 25.0))
 
     # --- Breath — surface unresolved memories ---
-    _call_endpoint(base_url, "/breath-hook", token)
+    _call_endpoint(base_url, "/breath-hook", token, timeout)
 
 
-def _call_endpoint(base_url, path, token):
+def _call_endpoint(base_url, path, token, timeout):
     headers = {"Accept": "text/plain"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
@@ -47,7 +54,7 @@ def _call_endpoint(base_url, path, token):
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=8) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
             output = raw.strip()
             if output:

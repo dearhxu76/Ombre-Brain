@@ -47,6 +47,32 @@ async def _with_deletion_requests(body: str) -> str:
     return f"{batch}\n\n{body}" if batch and body else (batch or body)
 
 
+async def surface_default_memories() -> str:
+    """Render the zero-argument breath memory surface without AI-only notices.
+
+    HTTP SessionStart uses this shared read path so its ordinary memory section
+    follows the live breath_max_results / breath_max_tokens defaults without
+    exposing pending deletion decisions to dashboard or public callers.
+    """
+    await rt.decay_engine.ensure_started()
+    surfacing_cfg = rt.config.get("surfacing", {}) or {}
+    try:
+        max_results = int(surfacing_cfg.get("breath_max_results") or 20)
+    except (TypeError, ValueError, OverflowError):
+        max_results = 20
+    try:
+        max_tokens = int(surfacing_cfg.get("breath_max_tokens") or 10000)
+    except (TypeError, ValueError, OverflowError):
+        max_tokens = 10000
+    max_results = max(1, min(max_results, 50))
+    max_tokens = max(500, min(max_tokens, 20000))
+    return await surface_default(
+        max_results=max_results,
+        max_tokens=max_tokens,
+        tag_filter=[],
+    )
+
+
 async def dispatch(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,

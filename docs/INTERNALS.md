@@ -1438,6 +1438,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `scoring_weights.content_weight` | `1.0` | 正文权重（B-07 修复值） |
 | `hooks.token` | `""` | `/breath-hook` 的 token；也可用 `OMBRE_HOOK_TOKEN`，仅通过请求头传递 |
 | `hooks.allow_public` | `false` | 是否允许 hook 无鉴权访问；也可用 `OMBRE_HOOK_ALLOW_PUBLIC=true`，仅建议在外层已有鉴权时开启 |
+| `hooks.extras_max_tokens` | `2000` | SessionStart 的 Letter / I / 锁信提示独立预算；主记忆段直接复用 `surfacing.breath_max_results` / `breath_max_tokens` |
 | `limits.max_bucket_bytes` | `51200` (50KB) | 单桶内容字节上限（iter 1.6 §5）；0 禁用 |
 | `limits.max_pinned` | `20` | `metadata.pinned=True` 桶数量上限；显式 permanent 不占；0 禁用 |
 | `limits.max_protected` | `20` | 活跃、非终态的 `metadata.protected=True` 逻辑桶上限；按 ID 去重；0 禁用 |

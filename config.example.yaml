@@ -68,6 +68,9 @@ mcp_token: ""
 hooks:
   token: ""
   allow_public: false
+  # SessionStart 主记忆段直接使用 surfacing.breath_max_results / breath_max_tokens。
+  # 下列预算只约束额外附带的 Letter / I / 锁信提示，不会挤占主 breath 预算。
+  extras_max_tokens: 2000
 
 # --- Bucket storage path / 记忆桶存储路径 ---
 # Point this to your Obsidian vault subdirectory, or any local folder

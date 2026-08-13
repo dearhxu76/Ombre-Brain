@@ -4,7 +4,9 @@ web/hooks.py — breath 浮现挂载点（HTTP hook）
 ========================================
 
 - /breath-hook：对话开头由外部 hook 拉取，返回应浮现的记忆（pinned + 未解决采样）。
-  protected 只防衰减，主池与 Letter/I 附加池都不通过 hook 主动注入。
+  主记忆段复用无参数 breath 的实时默认桶数/token 配置，不另设压缩或采样规则；
+  Letter/I 是 SessionStart 专属补充，使用独立的小额度，不挤占主 breath 预算。
+  protected 主池与 Letter/I 附加池都不通过 hook 主动注入。
 
 不提供 /dream-hook：dream 按哲学不是义务、不该每次开场自动触发（详见下方端点处注释）。
 
@@ -17,13 +19,12 @@ web/hooks.py — breath 浮现挂载点（HTTP hook）
 
 import asyncio
 import os
-import random
 import threading
 import time
 from collections import OrderedDict, deque
 from contextlib import asynccontextmanager
 
-from ombrebrain.policy.surfacing import SurfacePolicyVM
+from tools import breath as _t_breath
 from tools.plan.core import (
     is_letter_bucket,
     letter_lock_state,
@@ -33,23 +34,21 @@ from tools.plan.core import (
 from . import _shared as sh
 
 logger = sh.logger
-_SURFACE_POLICY = SurfacePolicyVM.default()
 
 _HOOK_CONCURRENCY = 2
 _HOOK_RATE_WINDOW_SECONDS = 60.0
 _HOOK_RATE_SOURCE_LIMIT = 10
 _HOOK_RATE_GLOBAL_LIMIT = 60
 _HOOK_RATE_SOURCE_CAP = 2048
-_HOOK_MIN_BLOCK_TOKENS = 120
 _hook_slots = threading.BoundedSemaphore(_HOOK_CONCURRENCY)
 _hook_rate_lock = threading.Lock()
 _hook_source_events: OrderedDict[str, deque[float]] = OrderedDict()
 _hook_global_events: deque[float] = deque()
 
 try:
-    from utils import strip_wikilinks, count_tokens_approx, get_ai_name  # type: ignore
+    from utils import count_tokens_approx, strip_wikilinks, get_ai_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks, count_tokens_approx, get_ai_name  # type: ignore
+    from ..utils import count_tokens_approx, strip_wikilinks, get_ai_name  # type: ignore
 
 
 def _truthy(value) -> bool:
@@ -207,10 +206,9 @@ def register(mcp) -> None:
             except Exception:
                 caller_side = None
 
-        # This endpoint performs expensive provider work and is intended for a
-        # non-browser SessionStart hook.  Do not let an ambient dashboard cookie
-        # turn a cross-origin GET into provider spend; explicit hook tokens are
-        # unaffected.
+        # This endpoint can expose memory text and is intended for a non-browser
+        # SessionStart hook.  Do not let an ambient dashboard cookie turn a
+        # cross-origin GET into a memory read; explicit hook tokens are unaffected.
         public = _truthy(os.environ.get("OMBRE_HOOK_ALLOW_PUBLIC")) or _truthy(
             _hook_setting("allow_public")
         )
@@ -234,9 +232,7 @@ def register(mcp) -> None:
             return max(minimum, min(maximum, value))
 
         timeout_seconds = setting_int("timeout_seconds", 45, 5, 120)
-        per_call_timeout = setting_int("dehydrate_timeout_seconds", 12, 2, 30)
-        max_dehydrate_calls = setting_int("max_dehydrate_calls", 8, 0, 32)
-        token_budget = setting_int("max_tokens", 10_000, 500, 50_000)
+        extras_budget = setting_int("extras_max_tokens", 2000, 200, 10000)
         no_store_headers = {
             "Cache-Control": "no-store",
             "X-Content-Type-Options": "nosniff",
@@ -244,97 +240,46 @@ def register(mcp) -> None:
 
         try:
             async with _timeout_after(timeout_seconds):
+                # SessionStart must surface exactly the same ordinary memory as
+                # the public zero-argument breath() tool.  In particular, do not
+                # keep a second hook-only result/token budget or run provider
+                # dehydration here: the helper reads the live surfacing defaults
+                # (breath_max_results / breath_max_tokens) itself.
+                main_surface = await _t_breath.surface_default_memories()
+                if caller_side == "ai":
+                    deletion_store = getattr(sh, "deletion_requests", None)
+                    if deletion_store is not None:
+                        deletion_batch = await deletion_store.render_pending_batch()
+                        if deletion_batch:
+                            main_surface = (
+                                f"{deletion_batch}\n\n{main_surface}"
+                                if main_surface else deletion_batch
+                            )
                 all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
-                pinned = [
-                    bucket for bucket in all_buckets
-                    if _truthy(bucket["metadata"].get("pinned"))
-                    and not _truthy(bucket["metadata"].get("protected"))
-                    and _SURFACE_POLICY.evaluate_bucket(
-                        bucket, mode="spontaneous"
-                    ).allowed
-                    and not is_letter_bucket(bucket)
-                ]
-                pinned.sort(
-                    key=lambda bucket: (
-                        int(bucket["metadata"].get("importance", 0) or 0),
-                        str(bucket["metadata"].get("created", "")),
-                    ),
-                    reverse=True,
-                )
-                unresolved = [
-                    bucket for bucket in all_buckets
-                    if not bucket["metadata"].get("resolved", False)
-                    and bucket["metadata"].get("type")
-                    not in ("permanent", "feel", "plan", "letter", "self", "i")
-                    and not _truthy(bucket["metadata"].get("pinned"))
-                    and not _truthy(bucket["metadata"].get("protected"))
-                    and not is_letter_bucket(bucket)
-                    and _SURFACE_POLICY.evaluate_bucket(
-                        bucket, mode="spontaneous"
-                    ).allowed
-                ]
-                scored = sorted(
-                    unresolved,
-                    key=lambda bucket: sh.decay_engine.calculate_score(bucket["metadata"]),
-                    reverse=True,
-                )
-
-                header = "[Ombre Brain - 记忆浮现]\n"
-                remaining = token_budget - count_tokens_approx(header)
                 parts: list[str] = []
-                dehydrate_calls = 0
+                extras: list[str] = []
+                extras_remaining = extras_budget
 
-                def append_block(block: str) -> bool:
-                    nonlocal remaining
-                    cost = count_tokens_approx(block) + 2
-                    if cost > remaining:
+                def append_main(block: str) -> bool:
+                    block = str(block or "").strip()
+                    if not block:
                         return False
                     parts.append(block)
-                    remaining -= cost
                     return True
 
-                async def append_summary(bucket: dict, *, prefix: str) -> bool:
-                    nonlocal dehydrate_calls
-                    if remaining < _HOOK_MIN_BLOCK_TOKENS:
+                def append_extra(block: str) -> bool:
+                    nonlocal extras_remaining
+                    block = str(block or "").strip()
+                    if not block:
                         return False
-                    raw = strip_wikilinks(str(bucket.get("content") or ""))
-                    if not raw:
-                        return True
-                    if dehydrate_calls >= max_dehydrate_calls:
+                    cost = count_tokens_approx(block) + 2
+                    if cost > extras_remaining:
                         return False
-                    dehydrate_calls += 1
-                    try:
-                        summary = await asyncio.wait_for(
-                            sh.dehydrator.dehydrate(
-                                raw,
-                                {
-                                    key: value
-                                    for key, value in (bucket.get("metadata") or {}).items()
-                                    if key != "tags"
-                                },
-                            ),
-                            timeout=per_call_timeout,
-                        )
-                    except Exception as exc:
-                        logger.warning("breath_hook dehydration failed: %s", exc)
-                        summary = raw[:1200]
-                    summary = str(summary or "").strip()
-                    if not summary:
-                        summary = raw[:1200]
-                    return append_block(prefix + summary)
+                    extras.append(block)
+                    extras_remaining -= cost
+                    return True
 
-                for bucket in pinned:
-                    if not await append_summary(bucket, prefix="📌 [核心准则] "):
-                        break
-
-                candidates = list(scored)
-                if len(candidates) > 1:
-                    pool = candidates[1:min(20, len(candidates))]
-                    random.shuffle(pool)
-                    candidates = [candidates[0], *pool]
-                for bucket in candidates[:20]:
-                    if not await append_summary(bucket, prefix=""):
-                        break
+                append_main(main_surface)
 
                 letters = [
                     bucket for bucket in all_buckets
@@ -391,7 +336,7 @@ def register(mcp) -> None:
                         date = meta.get("letter_date") or str(meta.get("created", ""))[:10]
                         title = _bounded_text(meta.get("title") or meta.get("name"), 200)
                         excerpt = strip_wikilinks(str(letter.get("content") or ""))[:400]
-                        append_block(
+                        append_extra(
                             f"💌 [{tag}] {date}{(' · ' + title) if title else ''}\n{excerpt}"
                         )
 
@@ -422,7 +367,7 @@ def register(mcp) -> None:
                                 notice = f"{writer_name}给你留了一封带锁的信，将于 {when} 解锁。"
                             else:
                                 notice = f"{writer_name}给你留了一封永久锁信，当前不可查看。"
-                            append_block(notice)
+                            append_extra(notice)
 
                 self_buckets = [
                     bucket for bucket in all_buckets
@@ -450,7 +395,7 @@ def register(mcp) -> None:
                     )
                     raw = strip_wikilinks(str(bucket.get("content") or ""))
                     excerpt = raw[:300]
-                    append_block(
+                    append_extra(
                         f"🪞{str(meta.get('created') or '')[:10]}"
                         f"{f' [{aspect}]' if aspect else ''}\n{excerpt}"
                     )
@@ -465,7 +410,9 @@ def register(mcp) -> None:
                         logger.warning("breath_hook telemetry failed: %s", exc)
                     return PlainTextResponse("", headers=no_store_headers)
 
-                body_text = header + "\n---\n".join(parts)
+                if extras:
+                    parts.append("=== SessionStart 补充 ===\n" + "\n---\n".join(extras))
+                body_text = "[Ombre Brain - SessionStart]\n" + "\n---\n".join(parts)
                 try:
                     await asyncio.wait_for(
                         sh.fire_webhook(
