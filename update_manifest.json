@@ -802,8 +802,8 @@
     },
     {
       "path": "src/tools/breath/__init__.py",
-      "sha256": "985094655968ae16722f795549f9f82d4ed9fa0360716151d33d2052c18b57b2",
-      "size": 6526
+      "sha256": "33801bdd1294122bf198de664c5ad0290dfbdd1952560072d4f94a9923c0aef7",
+      "size": 7533
     },
     {
       "path": "src/tools/breath/_verbatim.py",
@@ -977,8 +977,8 @@
     },
     {
       "path": "src/web/hooks.py",
-      "sha256": "64a509a71e797da053b229e3f323d5d0066449f80d49b2f5d84ac1acd37ecf5b",
-      "size": 20586
+      "sha256": "f5694bb3350f3ffcb5847dade556b8004c21f3b162b2afe7a3b9e7196d26cca2",
+      "size": 18445
     },
     {
       "path": "src/web/import_api.py",
