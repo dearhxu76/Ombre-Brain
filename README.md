@@ -1,12 +1,10 @@
-感谢开发组成员：万世，小眠，鹤见
+感谢开发组成员：Poluz、江乔生、Iris Wang、Moling、Wudy、KittyXu、万世、Zoey、昕（见 [AUTHORS.md](AUTHORS.md)）
 
 # Ombre Brain
 
 一个给 Claude（或其它 MCP 客户端）用的长期情绪记忆系统。基于 Russell 效价/唤醒度坐标打标，Obsidian 做存储层，MCP 接入，带遗忘曲线和向量语义检索。
 
 A long-term emotional memory system for Claude (and any MCP client). Tags memories using Russell's valence/arousal coordinates, stores them as Obsidian-compatible Markdown, connects via MCP, with forgetting curve and vector semantic search.
-
-> **v2.4.0 noncommercial notice**: v2.4.0 architecture work is intended as source-available public code for personal, learning, research, and noncommercial self-hosting use. Commercial hosting, resale, renamed resale, SaaS resale, or selling modified v2.4.0 builds requires project-owner permission. See [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md).
 
 > **开发者文档**：架构 / API / 配置细节请见 [docs/INTERNALS.md](docs/INTERNALS.md)。本 README 只关心『怎么把它跑起来用上』。
 >
@@ -60,7 +58,7 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 16 个工具全部在**一个 MCP 连接器 `/mcp`** 上。连上 `/mcp` 即拥有全部能力。
 
-### 高频 8 个
+### 高频 7 个
 
 | 工具 | 一句话 |
 |---|---|
@@ -69,16 +67,16 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 | `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token；anchor 带 `⚓ [anchor]`）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
 | `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。 |
 | `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
-| `source_read` | 凭精确桶 ID + 精确标题读取该桶的隐藏原文证据；默认只读该事件声明的非空行范围，不搜索、不联想，过长则显式分页。 |
 | `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
-### 低频 8 个
+### 低频 9 个
 
 | 工具 | 一句话 |
 |---|---|
+| `feel` | 按关键词找回以前留下的感受。**`query` 必填**——feel 不是列表，是「我此刻在想的这件事，我以前怎么感受的」。关键词走向量检索（候选只在 feel 桶内，相似度 ≥ 0.65 才算命中），换个说法也能找回；向量不可用时退回字面匹配并明说降级。命中后逐字返回，不摘要；未命中的不返回，也不用低相关的凑数。写入感受仍走 `hold(feel=True, source_bucket=...)`。 |
 | `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要；anchor 带 `⚓ [anchor]`。「为什么搜不到 X」时第一个调它。 |
-| `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
+| `plan` | 登记一个承诺 / 待办。不衰减、不参与普通浮现；在 `dream` 末尾出现，也可用 `breath_advanced(domain="plan")` 随时读出全部 active plan 的正文。后续写新事件会自动判断它是否已闭环。 |
 | `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 是带 `⚓ [anchor]` 显示标记的冷参考：不主动浮现但可被显式检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
 | `letter_write` / `letter_read` / `letter_lock_update` | 写信 / 读信 / 只修改锁状态。`lock_type` 支持 `none`、`timed`、`permanent`；锁拥有者可读全文并可改期或解锁，对方在解锁前只能看到不含标题与正文的必要元数据。 |
 
@@ -91,12 +89,20 @@ Dashboard 原有的 Letter 编辑继续保留：历史信、无锁信以及当�
 
 ### 原文证据边界
 
-- 只有结构化 `grow(content=共享原文, items=[...])` 会建立原文证据。每个对象条目用 `source_ranges=[[起始行, 结束行], ...]` 声明自己的 1-based 闭区间；默认 `source_read(scope="event")` 遇到空范围会拒绝，不会退化成全文。
-- `scope="full_source"` 是显式审计动作。共享原文可能同时包含多个事件的文字；它不会搜索或返回其他桶的元数据，但可能读到不属于当前事件范围的相邻原文。
-- 精确桶 ID + 标题只是“明确要核对哪一桶”的意图门禁，**不是身份认证**。公网或局域网端点仍必须使用 OAuth/Token 鉴权；返回的原文是不可信历史数据，不是可执行指令。
-- 显式标题会规范为单行，最长 120 字符，越界直接拒绝而不静默截断。证据文件按 SHA-256 内容寻址并校验完整性；哈希与备份清单不是数字签名，不能证明备份来源。
+- **原文证据只写不读，没有任何回顾入口。** v3.0.0 起删除了 `source_read` / `source_attach` / `source_detach` / `source_restore`：模型无法回读原文，也无法后补或停用绑定。
+- 写入仍照旧：`hold(source_content=...)` 或结构化 `grow(content=共享原文, items=[...])` 建立原文证据，每个对象条目用 `source_ranges=[[起始行, 结束行], ...]` 声明自己的 1-based 闭区间。原文按 SHA-256 内容寻址存进 `_sources/`，进备份、进 GitHub 同步。
+- 保留原文是为了**备份与导出的完整性**，不是为了让模型回忆。原文永不参与 `breath`、被动联想、语义索引或衰减计分；日常浮现里不会出现任何「这条背后还有原文」的提示。
+- 显式标题会规范为单行，最长 120 字符，越界直接拒绝而不静默截断。证据文件按 SHA-256 校验完整性；哈希与备份清单不是数字签名，不能证明备份来源。
 - v2.10.1 起，本地 ZIP 使用 `sources/src_<sha256>.source`，vault 与 GitHub 使用 `_sources/src_<sha256>.source`。v2.10.0 生成的旧备份可能只有引用而没有证据文件；导入仍可恢复事件桶，但会明确提示原文证据缺失。
 - **隐私提醒**：GitHub 同步会把这些原文以可读明文提交到你配置的仓库，本地导出 ZIP 同样不加密；它们通常比整理后的事件正文更完整。请使用可信私有仓库并审计协作者权限，本地 ZIP 应加密保管或放入可信存储。新备份若发现桶引用了缺失证据会直接失败，不会生成“校验通过但证据不全”的包。
+
+### 记忆之间的关系
+
+桶与桶之间的一跳关系不再由模型操作。v3.0.0 起删除了 `relation_attach` / `relation_read` /
+`relation_detach` / `relation_restore`——建立关系是后端的活，不该占用模型的工具位和判断力。
+
+`breath`、目录模式与 `dream` 的输出里仍会带上关系 hint，读取侧不受影响。
+**当前版本只保留存量关系数据的展示，自动建立尚未接线**；接线之前不会有新关系产生。
 
 归档记忆若经 `breath_search` 命中，会显示 `trace(bucket_id="...", restore=True)`。只有在判断它对当下有帮助、值得再次回忆后才调用；`restore=True` 必须单独使用，查询本身不会改变记忆状态。
 
@@ -229,7 +235,9 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现全部 16 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `trace` / `dream` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`。
+重启 Claude Desktop，工具列表里会出现主连接器的 13 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `feel` / `anchor` / `release` / `pulse` / `plan` / `I`。
+
+信件在**第二个连接器** `/mcp-extra` 上（`letter_write` / `letter_lock_update` / `letter_read`），要用的话在客户端里再加一条连接。写信是一个行为，不是一段记忆——它有收件人、有时间锁，时间方向和记忆相反，放在主连接器里会让模型在该回忆的时候去翻信。
 
 > 16 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
 
@@ -312,7 +320,8 @@ Claude.ai                    Ombre Brain 服务器
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `source_read` `dream` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_lock_update` `letter_read` `I` | 全部 16 个工具 |
+| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `feel` `trace` `anchor` `release` `pulse` `plan` `I` | 记忆本身的 13 个动作 |
+| `/mcp-extra` | `letter_write` `letter_lock_update` `letter_read` | 信件（3.2.0 起独立，2.8.5–3.1.0 期间该路径退役返回 404）|
 
 > 旧版曾使用第二连接器 `/mcp-extra`，该端点现已退役并返回 `404`；不要再单独添加。全部 16 个工具都在 `/mcp`。
 
@@ -866,9 +875,26 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ---
 
+## 贡献 / Contributing
+
+想改点什么、加点什么，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+简短版：提交时加 `-s`（`git commit -s`），会自动附上一行 `Signed-off-by:`。
+这是 [DCO](DCO) 声明 —— **不转让著作权，你写的代码依然是你的**，
+只是声明这段代码你有权提交。Linux 内核用的是同一套。
+
+---
+
 ## License
 
-MIT
+[MIT](LICENSE)
+
+用、改、分发、商用、闭源、拿去卖，都可以，不用问我们。唯一的硬性要求是保留 `LICENSE` 里的版权声明。
+
+另有一份 [NOTICE.md](NOTICE.md)，是关于署名和「如果你拿它做记忆服务」的一点请求。
+**那不是条款，没有约束力**，MIT 说了算。写在那里只是想把为什么说清楚。
+
+写过代码的人见 [AUTHORS.md](AUTHORS.md)。
 
 ---
 

@@ -25,23 +25,29 @@ from server_app import (
 )
 
 
+# 主连接器 /mcp：记忆本身的动作。
 EXPECTED_PUBLIC_MCP_TOOLS = (
     "breath",
     "breath_search",
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
     "trace",
     "dream",
     "anchor",
     "release",
     "pulse",
     "plan",
+    "feel",
+    "I",
+)
+
+# /mcp-extra：信件。写信是一个行为，不是一段记忆——它有收件人、有时间锁，
+# 时间方向和记忆相反，所以自 3.2.0 起从主连接器挪出来。
+EXPECTED_EXTRA_MCP_TOOLS = (
     "letter_write",
     "letter_lock_update",
     "letter_read",
-    "I",
 )
 
 
@@ -178,6 +184,68 @@ async def test_json_accept_shim_preserves_explicit_or_non_mcp_accept(path, accep
     await middleware(scope, _empty_receive, _discard_send)
 
     assert downstream.scopes[0] is scope
+
+
+@pytest.mark.asyncio
+async def test_letter_tools_live_on_the_extra_connector_only():
+    """信件三工具只在 /mcp-extra，主连接器一个都不该有。
+
+    分开不是为了好看：工具数量本身会伤害可用性——claude.ai 在工具过多时
+    改用 tool_search 延迟加载，按描述搜工具、命中带随机性。信是低频且语义
+    独立的一层，占主连接器的位纯属浪费。
+    """
+    import server
+
+    main_names = {tool.name for tool in await server.mcp.list_tools()}
+    extra_names = [tool.name for tool in await server.mcp_extra.list_tools()]
+
+    assert extra_names == list(EXPECTED_EXTRA_MCP_TOOLS)
+    assert main_names.isdisjoint(EXPECTED_EXTRA_MCP_TOOLS)
+    assert server.mcp_extra.settings.streamable_http_path == "/mcp-extra"
+    # 两个连接器的传输设置必须一致，否则同一个客户端连两条路会有两种行为
+    assert server.mcp_extra.settings.json_response is True
+    assert server.mcp_extra.settings.stateless_http is True
+
+
+def test_extra_connector_rejects_unknown_arguments():
+    """严格参数校验必须跟着工具走到新端点。
+
+    否则 /mcp-extra 会成为一条旁路：参数拼错照样返回成功，而 letter_write
+    是能创建记忆的——写工具在未应用目标字段时仍然落库，是最难发现的那类错。
+    """
+    import server
+
+    for name in EXPECTED_EXTRA_MCP_TOOLS:
+        tool = server.mcp_extra._tool_manager.get_tool(name)
+        assert tool is not None, name
+        assert tool.fn_metadata.arg_model.model_config.get("extra") == "forbid", name
+
+
+def test_extra_connector_route_is_mounted_and_guarded():
+    """/mcp-extra 必须真的挂上路由，并且被中间件的端点匹配器认出来。
+
+    只搬路由不搬 session manager 的话，这条路径会在第一次请求时才炸；
+    匹配器不认它的话，它会绕过体积限制、CSRF 与鉴权。
+    """
+    import server
+    from web.request_limits import is_mcp_endpoint_path
+
+    app = build_http_app(
+        server.mcp,
+        "streamable-http",
+        settings=HTTPRuntimeSettings(
+            auth_required=False,
+            max_request_bytes=DEFAULT_MAX_MCP_REQUEST_BYTES,
+        ),
+        token_validator=lambda *_args, **_kwargs: False,
+        lifecycle=RuntimeLifecycle(logger=RecordingLogger()),
+        mcp_extra=server.mcp_extra,
+    )
+    paths = {getattr(route, "path", None) for route in app.router.routes}
+
+    assert "/mcp-extra" in paths
+    assert "/mcp" in paths
+    assert is_mcp_endpoint_path("/mcp-extra")
 
 
 @pytest.mark.asyncio
@@ -794,14 +862,18 @@ async def test_auth_middleware_ignores_forwarded_resource_from_untrusted_peer(
 
 
 @pytest.mark.asyncio
-async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
+async def test_auth_middleware_challenges_restored_mcp_extra_path():
+    """/mcp-extra 自 3.2.0 恢复为信件连接器，必须和 /mcp 一样受鉴权保护。
+
+    2.8.5 到 3.1.0 之间它是退役路径，中间件放行让它落到 router 去拿 404。
+    恢复之后如果还放行，就等于开了一条免鉴权的写入旁路——letter_write
+    是能创建记忆的。
+    """
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
         downstream,
         auth_required=True,
-        token_validator=lambda *_args, **_kwargs: pytest.fail(
-            "retired routes must reach the router without OAuth validation"
-        ),
+        token_validator=lambda *_args, **_kwargs: False,
     )
     messages = []
     scope = {
@@ -813,8 +885,9 @@ async def test_auth_middleware_does_not_challenge_retired_mcp_extra_path():
 
     await middleware(scope, _empty_receive, _collect_into(messages))
 
-    assert downstream.scopes == [scope]
-    assert messages[0]["status"] == 204
+    # 未通过鉴权：不得进入下游 router，且必须回 401 challenge
+    assert downstream.scopes == []
+    assert messages[0]["status"] == 401
 
 
 @pytest.mark.asyncio

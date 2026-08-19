@@ -467,7 +467,33 @@ _MAX_METADATA_NODES = 10_000
 
 # --- search 评分 ---
 _VECTOR_TOPK = 50          # embedding 预取 top_k（仅作 semantic 分源，不窄化候选集）
-_VECTOR_RECALL_THRESHOLD = 0.65  # 纯语义候选进入结果池的最低余弦相似度
+# 纯语义候选进入结果池的最低余弦相似度。config.matching.vector_recall_threshold 可覆盖。
+#
+# 2026-08-18 从 0.65 下调到 0.55，依据是对 917 桶真实记忆的只读扫描：
+#
+#   阈值    平均新增/查询   双通道印证率   新增相似度中位
+#   0.65        0.1          100.0%         0.661   ← 旧值
+#   0.55        8.6           88.3%         0.566   ← 拐点
+#   0.50       55.1           69.0%         0.520
+#   0.45      170.8           60.6%         0.483
+#
+# 0.65 之下这条语义直通路**事实上不存在**：9 个宽泛查询一共只有 1 条桶能靠它
+# 进来，「我的工作」「同事」「情绪」全是 0。代码里写着 text_match or
+# semantic_match，但后一支从来不为真——OB 名义上是混合检索，实际是纯关键词检索。
+#
+# 原因是 semantic 权重只占 2.5/13.5≈18.5%：一条桶哪怕相似度 0.9，单靠这一维也
+# 只贡献约 16.7 分，离 fuzzy_threshold=50 差得远，必须同时在 topic（关键词重合）
+# 上得分才过得去。而「我的工作」这几个字根本不会字面出现在记忆里。
+#
+# 选 0.55 而不是更低：双通道印证率（新召回的桶里同时被关键词命中的比例）在这里
+# **不降反升**到 88.3%，说明捞回的是"关键词也认、只是加权分被七维稀释掉"的桶；
+# 再往下印证率单调劣化，0.45 时每查询涌进 170 条、印证率只剩 60%，那是拿噪音换召回。
+#
+# ⚠️ 已知弱点：印证率用"关键词也命中"当作"真的相关"的代理，而宽泛查询恰恰是
+# 关键词最不管用的场景——它能证明 0.45 是坏的，不能独立证明 0.55 是好的。
+# 0.55 最终由人工逐条看过新召回内容后确认（面试、薪资与配得感、上线那一刻的
+# 踏实感，都是该出现却一条都出不来的记忆）。调整前请重跑扫描，不要直接改数字。
+_VECTOR_RECALL_THRESHOLD = 0.55
 _RESOLVED_RANK_PENALTY = 0.3   # resolved 桶仅在排序时降权
 _LITERAL_MATCH_BONUS = 25.0    # 查询串原样命中 name/tags/domain/正文时的召回加分（修短查询召回）
 
@@ -521,6 +547,15 @@ class BucketManager:
         self.plan_dir = os.path.join(self.base_dir, "plans")
         self.letter_dir = os.path.join(self.base_dir, "letters")
         self.fuzzy_threshold = config.get("matching", {}).get("fuzzy_threshold", 50)
+        # 纯语义候选的门槛。见 _VECTOR_RECALL_THRESHOLD 上方的扫描依据。
+        try:
+            self.vector_recall_threshold = float(
+                config.get("matching", {}).get(
+                    "vector_recall_threshold", _VECTOR_RECALL_THRESHOLD
+                )
+            )
+        except (TypeError, ValueError):
+            self.vector_recall_threshold = _VECTOR_RECALL_THRESHOLD
         self.max_results = config.get("matching", {}).get("max_results", 5)
 
         # --- Search scoring weights / 检索权重配置 ---
@@ -1425,6 +1460,7 @@ class BucketManager:
         defer_derived_index: bool = False,
         imported: bool = False,
         source_refs: Any = None,
+        quotes: Any = None,
         event_actor: str = "system",
         lock_type: str = "",
         unlock_date: str | None = None,
@@ -1538,7 +1574,16 @@ class BucketManager:
                     str(writer_name)
                 ).strip()[:120]
         if source_refs:
-            metadata["source_refs"] = source_refs
+            from ombrebrain.storage.source_store import source_links_from_metadata, active_source_refs_from_links
+
+            metadata["source_links"] = source_links_from_metadata({"source_refs": source_refs})
+            metadata["source_refs"] = active_source_refs_from_links(metadata["source_links"])
+        # 引语：当时说出口、并且当时就知道它重要的那几句话，原样存下。
+        # 落在 metadata 而不是正文，是为了让渲染路径**结构上就拿不到**——
+        # render_stored_bucket / dream / catalog 都是白名单渲染，不会碰这个字段。
+        # "平时不返回"不能靠"记得别渲染"。
+        if quotes:
+            metadata["quotes"] = self._sanitize_quotes(quotes)
         if imported:
             metadata["imported"] = True
         if test_data:
@@ -2225,6 +2270,96 @@ class BucketManager:
             )
         return committed
 
+    async def mutate_source_links(self, bucket_id: str, mutation: Any) -> Any:
+        """Atomically change evidence bindings only, including archived buckets.
+
+        The callback receives the loaded frontmatter post and returns
+        ``(changed, result)``.  This deliberately bypasses normal update()
+        lifecycle/recency behaviour while retaining the per-bucket write turn.
+        """
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return None
+            try:
+                post = frontmatter.load(file_path)
+            except Exception:
+                return None
+            changed, result = mutation(post)
+            if changed:
+                _atomic_write_text(file_path, frontmatter.dumps(post))
+            return result
+
+    async def mutate_relation_links(self, bucket_id: str, mutation: Any) -> Any:
+        """Atomically change one Relation ledger only; never touch derived state."""
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return None
+            try:
+                post = frontmatter.load(file_path)
+            except Exception:
+                return None
+            changed, result = mutation(post)
+            if changed:
+                _atomic_write_text(file_path, frontmatter.dumps(post))
+            return result
+
+    async def mutate_relation_pair(
+        self,
+        left_bucket_id: str,
+        right_bucket_id: str,
+        mutation: Any,
+    ) -> Any:
+        """Atomically change both mirrored Relation ledgers under ordered locks.
+
+        ``mutation(left_post, right_post)`` returns
+        ``(left_changed, right_changed, result)``.  Both bucket files are loaded
+        while holding the same two cross-process bucket turns.  If the second
+        write fails after the first was committed, the first file is restored
+        to its pre-mutation serialization before the error is re-raised.
+        """
+        left_bucket_id = str(left_bucket_id or "").strip()
+        right_bucket_id = str(right_bucket_id or "").strip()
+        if not left_bucket_id or not right_bucket_id or left_bucket_id == right_bucket_id:
+            return None
+
+        first_id, second_id = sorted((left_bucket_id, right_bucket_id))
+        async with self._bucket_turn(first_id):
+            async with self._bucket_turn(second_id):
+                left_path = self._find_bucket_file(left_bucket_id)
+                right_path = self._find_bucket_file(right_bucket_id)
+                if not left_path or not right_path:
+                    return None
+                try:
+                    left_post = frontmatter.load(left_path)
+                    right_post = frontmatter.load(right_path)
+                except Exception:
+                    return None
+
+                left_before = frontmatter.dumps(left_post)
+                right_before = frontmatter.dumps(right_post)
+                left_changed, right_changed, result = mutation(left_post, right_post)
+                if not left_changed and not right_changed:
+                    return result
+
+                left_written = False
+                right_written = False
+                try:
+                    if left_changed:
+                        _atomic_write_text(left_path, frontmatter.dumps(left_post))
+                        left_written = True
+                    if right_changed:
+                        _atomic_write_text(right_path, frontmatter.dumps(right_post))
+                        right_written = True
+                except Exception:
+                    if left_written:
+                        _atomic_write_text(left_path, left_before)
+                    if right_written:
+                        _atomic_write_text(right_path, right_before)
+                    raise
+                return result
+
     async def _update_locked(
         self,
         bucket_id: str,
@@ -2296,6 +2431,9 @@ class BucketManager:
             kwargs["source_refs_append"] = normalize_source_refs(
                 kwargs["source_refs_append"]
             )
+        if "quotes_append" in kwargs:
+            # 早校验：非法引语在这里就报错，不要等到写文件那一步。
+            kwargs["quotes_append"] = self._sanitize_quotes(kwargs["quotes_append"])
 
         try:
             post = frontmatter.load(file_path)
@@ -2428,12 +2566,25 @@ class BucketManager:
         if "title" in kwargs and kwargs["title"]:
             post["title"] = kwargs["title"]
         if "source_refs_append" in kwargs and kwargs["source_refs_append"]:
-            from ombrebrain.storage.source_store import normalize_source_refs
+            from ombrebrain.storage.source_store import append_source_links, active_source_refs_from_links
 
-            existing_refs = post.get("source_refs") or []
-            post["source_refs"] = normalize_source_refs(
-                list(existing_refs) + list(kwargs["source_refs_append"])
+            links = append_source_links(post.metadata, kwargs["source_refs_append"])
+            post["source_links"] = links
+            post["source_refs"] = active_source_refs_from_links(links)
+        if "quotes_append" in kwargs and kwargs["quotes_append"]:
+            # 合并到已有桶时两边的引语都保留——每条引语属于它自己的那个时刻，
+            # 不因为两段记忆被合并就作废。超上限的部分丢弃并明说，不静默。
+            merged, dropped = self._merge_quotes(
+                post.metadata.get("quotes"), kwargs["quotes_append"]
             )
+            if merged:
+                post["quotes"] = merged
+            if dropped:
+                _ob_push_warning(
+                    "OB-W006",
+                    f"合并到已有记忆后引语超过上限，最早的几条被保留，"
+                    f"另外 {dropped} 条未写入（update:{bucket_id}）",
+                )
         if "resolved" in kwargs:
             post["resolved"] = kwargs["resolved"]
         if "pinned" in kwargs:
@@ -3469,10 +3620,33 @@ class BucketManager:
                 # Threshold check uses raw (pre-penalty) score so resolved buckets
                 # 阈值用原始分数判定，确保 resolved 桶在关键词命中时仍可被搜出
                 # remain reachable by keyword (penalty applied only to ranking).
+                # ⚠️ 已知设计债：这道门混了两类不同的东西。
+                #
+                # `normalized` 是七维加权和，其中 topic / bm25 / semantic 回答的是
+                # "这条记忆和查询有关吗"，而 emotion / time / importance / touch
+                # 回答的是"这条记忆本身怎么样"（新不新、重不重要、被摸过几次）。
+                # 两个问题被加成同一个分数，去过同一道门。
+                #
+                # 2026-08-18 对 917 桶真实记忆扫描过：相关性三维全为 0 却入选的
+                # 命中数是 **0**。但那是**算术上的巧合，不是设计上的保证**——
+                # 后四维权重合计 3.5/13.5，凑不满 fuzzy_threshold=50 而已。
+                # 这几个权重都在 config.scoring 里，谁把 time_weight 从 1.5 调到
+                # 4.0，门立刻就漏，而且是静默地漏：不报错、不变慢，只是开始返回
+                # "最近、很重要、但跟你问的完全无关"的记忆。
+                #
+                # 对的形状是把召回与排序分开：
+                #     门：  max(topic, bm25, semantic) >= 门槛   ← 只有相关性维度能开门
+                #     排序：现在这套七维加权分                    ← 后四维在这里发挥作用
+                # 一条相关的记忆因为更新、更重要而排前面完全合理；但它不该因为
+                # 新和重要就变得"相关"。
+                #
+                # 没有立刻改，是因为当前没有故障、且这是召回主路径；真要动需要先
+                # 攒一批带标准答案的查询（"我问了什么、期望返回什么"），否则无法
+                # 验证新门是不是把该召回的挡在了外面。见 docs/INTERNALS.md §3.1。
                 text_match = normalized >= self.fuzzy_threshold or literal_hit
                 semantic_match = (
                     semantic_score is not None
-                    and semantic_score >= _VECTOR_RECALL_THRESHOLD
+                    and semantic_score >= self.vector_recall_threshold
                 )
                 if text_match or semantic_match:
                     # Resolved buckets get ranking penalty (but still reachable by keyword)
@@ -3957,6 +4131,62 @@ class BucketManager:
             + list(range(0x2066, 0x206A))        # bidi isolates 0x2066..0x2069
         }
         return str(text).translate(_ctrl_table)
+
+    @staticmethod
+    def _sanitize_quotes(value: Any) -> list[dict[str, str]]:
+        """归一化 + 清洗引语，返回可直接写进 frontmatter 的结构。
+
+        分工：`normalize_quotes` 管结构、条数与长度（超限直接 raise，不截断，
+        因为截断过的引语已经不是原话）；这里只补 F-04 控制字符清洗。
+        清洗只会让文本变短，所以不会绕过上面的长度校验。
+        """
+        from ombrebrain.storage.quote_store import normalize_quotes
+
+        cleaned: list[dict[str, str]] = []
+        for quote in normalize_quotes(value):
+            entry = {
+                key: BucketManager._sanitize_text(text).strip()
+                for key, text in quote.items()
+            }
+            # 整条内容都是控制字符时 text 会被清空——那不是一句话，丢掉。
+            if entry.get("text"):
+                cleaned.append({key: text for key, text in entry.items() if text})
+        return cleaned
+
+    @staticmethod
+    def _merge_quotes(
+        existing: Any, incoming: Any
+    ) -> tuple[list[dict[str, str]], int]:
+        """合并两组引语，返回 (结果, 因超上限被丢弃的条数)。
+
+        合并到已有桶时两边的引语都该留下——每条引语属于它自己的那个时刻，
+        不因为两段记忆被合并就作废。但上限仍然要守，否则反复合并就能
+        无限累积，这个功能会变回"存原文"。
+
+        超出时保留**先来的**：早先记住的那几句是更早那个时刻的判断，
+        新来的引语至少还在当次调用的返回里说明被丢弃了。
+
+        已存在的引语用宽容读取（磁盘上的数据可能被手工编辑坏），
+        本次传入的用严格校验——只有当下这次输入才该收到明确的报错。
+        """
+        from ombrebrain.storage.quote_store import MAX_QUOTES, quotes_from_metadata
+
+        groups = (
+            quotes_from_metadata({"quotes": existing}),
+            BucketManager._sanitize_quotes(incoming),
+        )
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for group in groups:
+            for quote in group:
+                key = (quote["text"], quote.get("speaker", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(quote)
+        if len(merged) <= MAX_QUOTES:
+            return merged, 0
+        return merged[:MAX_QUOTES], len(merged) - MAX_QUOTES
 
     @staticmethod
     def _sanitize_float_field(value, default: float) -> float:

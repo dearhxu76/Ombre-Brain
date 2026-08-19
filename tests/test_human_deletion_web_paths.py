@@ -104,7 +104,7 @@ async def test_all_human_delete_paths_submit_formal_requests(monkeypatch, tmp_pa
     pending = store.pending_with_buckets()
     assert {item["bucket_id"] for item in pending} == set(records)
     actions = {item["bucket_id"]: item["action"] for item in pending}
-    assert actions == {"delete": "delete", "archive": "archive", "batch": "archive", "letter": "delete", "review": "delete"}
+    assert actions == {"delete": "delete", "archive": "delete", "batch": "delete", "letter": "delete", "review": "delete"}
 
 
 @pytest.mark.asyncio
@@ -127,6 +127,6 @@ async def test_web_delete_and_archive_keep_test_buckets_direct(monkeypatch, tmp_
         Request({"ids": ["batch-test"], "action": "archive"})
     )
 
-    assert manager.deleted == ["delete-test"]
-    assert manager.archived == ["archive-test", "batch-test"]
+    assert manager.deleted == ["delete-test", "archive-test", "batch-test"]
+    assert manager.archived == []
     assert store._load()["requests"] == []

@@ -265,6 +265,13 @@ def _parse_structured_memory_json(
     marker_fields = {
         "name", "domain", "valence", "arousal", "tags", "importance"
     }
+    known_conversation_fields = {"chat_messages", "mapping", "messages"}
+    if not explicit_wrapper and any(
+        isinstance(item, dict)
+        and known_conversation_fields.intersection(item)
+        for item in candidates
+    ):
+        return None
     dictionary_items = all(
         isinstance(item, dict) and "role" not in item for item in candidates
     )

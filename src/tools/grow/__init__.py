@@ -28,6 +28,7 @@ from .. import _runtime as rt
 from .._common import check_grow_input_size, check_grow_items_payload
 from .shortpath import grow_shortpath
 from .core import grow_core, grow_items
+from .retry_guard import request_fingerprint, run_once
 
 
 _TITLE_ANCHOR_SPLIT_RE = re.compile(
@@ -148,7 +149,15 @@ async def dispatch(
             err = _shifted_source_ranges_error(items, content)
             if err:
                 return err
-        return await grow_items(items, source_content=content, test_data=test_data)
+        fingerprint = request_fingerprint(
+            content=content, items=items, test_data=test_data
+        )
+        return await run_once(
+            fingerprint,
+            lambda: grow_items(
+                items, source_content=content, test_data=test_data
+            ),
+        )
 
     if not content or not content.strip():
         return "内容为空，无法整理。"
@@ -157,6 +166,15 @@ async def dispatch(
     if err:
         return err
 
+    fingerprint = request_fingerprint(
+        content=content, items=None, test_data=test_data
+    )
     if len(content.strip()) < 30:
-        return await grow_shortpath(content, test_data=test_data)
-    return await grow_core(content, test_data=test_data)
+        return await run_once(
+            fingerprint,
+            lambda: grow_shortpath(content, test_data=test_data),
+        )
+    return await run_once(
+        fingerprint,
+        lambda: grow_core(content, test_data=test_data),
+    )

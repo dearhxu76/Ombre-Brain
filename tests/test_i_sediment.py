@@ -221,6 +221,22 @@ async def test_dream_shows_candidates_and_records_one_witness_per_day(env):
 
 
 @pytest.mark.asyncio
+async def test_pending_candidate_outside_recent_window_still_gets_witnessed(env):
+    """A pending I candidate must not become impossible to promote with age."""
+    await i_core.i_core(content="我觉得这条旧候选仍需要完成沉淀。")
+    bucket_id = next(iter(env.buckets))
+    old = "2026-08-01T00:00:00"
+    await env.update(bucket_id, created=old, last_active=old)
+
+    out = await dream.dispatch(window_hours=48)
+
+    assert "我写下的「我觉得」（待沉淀）" in out
+    assert bucket_id in out
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert env.buckets[bucket_id]["metadata"]["i_dream_dates"] == [today]
+
+
+@pytest.mark.asyncio
 async def test_candidate_visible_in_recent_counts_when_i_section_is_omitted(
     env,
     monkeypatch,

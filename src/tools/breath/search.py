@@ -34,8 +34,9 @@ from datetime import datetime, time
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
+from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 from ._verbatim import render_stored_bucket
-from utils import parse_bool, parse_iso_datetime
+from utils import count_tokens_approx, parse_bool, parse_iso_datetime
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
 
@@ -209,6 +210,7 @@ async def surface_search(
     tag_filter: list,
     date_from: str = "",
     date_to: str = "",
+    with_quotes: bool = False,
 ) -> str:
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
@@ -390,6 +392,15 @@ async def surface_search(
             rendered, entry_tokens = render_stored_bucket(
                 bucket, header, _footprint(bucket)
             )
+        # 引语：唯一的出口就在这里。默认不附加——每一条浮现路径
+        # （breath / dream / catalog / feel）走的都是白名单渲染，读不到这个字段。
+        # 只有我在这次调用里明确说了「我想知道当时是怎么说的」，它才出现。
+        # 附加之后必须重算 token：预算是按实际返回的字数算的，不是按正文。
+        if with_quotes:
+            quote_block = render_quotes(quotes_from_metadata(meta))
+            if quote_block:
+                rendered = f"{rendered}\n{quote_block}"
+                entry_tokens = count_tokens_approx(rendered)
         if token_used + entry_tokens > max_tokens:
             budget_blocked = True
             break

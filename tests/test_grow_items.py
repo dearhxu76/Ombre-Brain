@@ -15,8 +15,8 @@ import pytest
 import tools._runtime as rt
 from tools.grow import dispatch
 from tools.grow.core import grow_core, grow_items
+from tools.grow.shortpath import grow_shortpath
 from tools.trace.core import trace_core
-from tools.source_read import dispatch as source_read
 from errors import PublicToolError
 from ombrebrain.storage.source_store import SourceStore
 
@@ -222,14 +222,17 @@ async def test_shortpath_reason_is_stored_on_first_create_and_preserved_on_merge
     dehydrator = ChangingWhyDehydrator()
     rt.dehydrator = dehydrator
 
-    first = await dispatch(content=content)
+    # This is a merge-policy unit test, so call the short path directly.
+    # Public dispatch deliberately treats an immediate identical call as a
+    # transport retry and reuses the first result.
+    first = await grow_shortpath(content)
     first_bucket = (await bucket_mgr.list_all(include_archive=False))[0]
     assert "新建" in first
     assert first_bucket["metadata"]["why_remembered"] == (
         "首次新建时的自动理由。"
     )
 
-    second = await dispatch(content=content)
+    second = await grow_shortpath(content)
     buckets = await bucket_mgr.list_all(include_archive=False)
     assert "合并" in second
     assert len(buckets) == 1
@@ -600,19 +603,22 @@ async def test_aligned_multi_event_source_ranges_round_trip(grow_rt):
 
     buckets = await bucket_mgr.list_all(include_archive=False)
     by_title = {bucket["metadata"]["title"]: bucket for bucket in buckets}
-    first = await source_read(by_title["蓝鲸计划"]["id"], "蓝鲸计划")
-    middle = await source_read(by_title["樱桃烘焙"]["id"], "樱桃烘焙")
-    last = await source_read(by_title["火星旅行"]["id"], "火星旅行")
-    full = await source_read(
-        by_title["蓝鲸计划"]["id"], "蓝鲸计划", scope="full_source"
-    )
-    denied = await source_read(by_title["蓝鲸计划"]["id"], "错误标题")
+    # 工具层已删除，直接从存储层验证每个事件的 ranges 只选中自己那几行
+    store = rt.source_store
+
+    def event_text(title: str) -> str:
+        ref = by_title[title]["metadata"]["source_refs"][0]
+        return store.select_ranges(store.read(ref["ref"]), ref["ranges"])
+
+    first = event_text("蓝鲸计划")
+    middle = event_text("樱桃烘焙")
+    last = event_text("火星旅行")
+    full = store.read(by_title["蓝鲸计划"]["metadata"]["source_refs"][0]["ref"])
 
     assert "深海航线" in first and "樱桃派" not in first
     assert "樱桃派" in middle and "火星基地" not in middle
     assert "火星基地" in last and "蓝鲸观测" not in last
     assert "开场：这两行只是寒暄。" in full and "火星基地" in full
-    assert "标题不匹配" in denied
 
 
 @pytest.mark.asyncio

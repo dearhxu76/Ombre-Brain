@@ -60,8 +60,9 @@ from ombrebrain.storage.backup_archive import (
 from ombrebrain.storage.source_store import (
     SOURCE_REF_RE,
     SourceStore,
-    normalize_source_refs,
+    referenced_source_ids_from_metadata,
 )
+from ombrebrain.storage.relation_store import normalize_relation_links
 
 try:
     from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
@@ -698,6 +699,11 @@ class MigrateEngine:
         normalized = normalizer(metadata) if callable(normalizer) else metadata
         if not isinstance(normalized, dict):
             raise BackupArchiveError("bucket metadata 必须是对象")
+        if "relation_links" in normalized:
+            try:
+                normalized["relation_links"] = normalize_relation_links(normalized["relation_links"])
+            except ValueError as exc:
+                raise BackupArchiveError(f"relation_links invalid: {exc}") from exc
         try:
             encoded = json.dumps(
                 normalized,
@@ -833,9 +839,7 @@ class MigrateEngine:
                 )
                 post = frontmatter.loads(raw.decode("utf-8"))
                 meta = self._normalize_import_metadata(dict(post.metadata))
-                if meta.get("source_refs"):
-                    for source_ref in normalize_source_refs(meta["source_refs"]):
-                        referenced_sources.add(source_ref["ref"])
+                referenced_sources.update(referenced_source_ids_from_metadata(meta))
                 content_size = len((post.content or "").encode("utf-8"))
                 if content_size > content_limit:
                     raise BackupArchiveError(
@@ -986,6 +990,7 @@ class MigrateEngine:
         buckets_dir = self._config.get("buckets_dir", "buckets")
         imported_id_map: dict[str, str] = {}
         imported_files: dict[str, str] = {}
+        package_bucket_ids = frozenset(pb.bucket_id for pb in self._parsed_buckets)
 
         try:
             # 先发布内容寻址的原文，然后才允许任何 bucket 引用落盘。
@@ -1026,6 +1031,10 @@ class MigrateEngine:
                 self._apply_done += 1
 
             # ---- 向量数据处理 ----
+            await _to_thread_reaped(
+                self._remap_imported_relation_targets, imported_files, imported_id_map,
+                package_bucket_ids,
+            )
             merged_ids: set[str] = set()
             if embedding_matches and self._has_embeddings and (
                 self._zip_db_bytes or self._zip_db_path
@@ -1093,6 +1102,31 @@ class MigrateEngine:
             installed_ref = store.put(content)
             if installed_ref != ref:
                 raise BackupArchiveError(f"原文证据内容与引用不匹配: {ref}")
+
+    def _remap_imported_relation_targets(
+        self, files: dict[str, str], id_map: dict[str, str], package_bucket_ids: frozenset[str]
+    ) -> None:
+        """Remap Relation targets without retaining failed in-package edges."""
+        for _target_id, path in files.items():
+            post = frontmatter.load(path)
+            links = normalize_relation_links(post.metadata.get("relation_links"))
+            changed = False
+            for link in links:
+                target_id = link["target_bucket_id"]
+                mapped = id_map.get(target_id)
+                if mapped and mapped != target_id:
+                    link["target_bucket_id"] = mapped
+                    changed = True
+                elif target_id in package_bucket_ids and not mapped and link["status"] != "detached":
+                    link["status"] = "detached"
+                    changed = True
+                    logger.warning(
+                        "[migrate] detached Relation target %s in %s because it was not imported",
+                        target_id, _target_id,
+                    )
+            if changed:
+                post["relation_links"] = links
+                self._atomic_write(path, frontmatter.dumps(post))
 
     async def _apply_one_bucket(
         self,

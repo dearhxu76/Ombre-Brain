@@ -331,7 +331,8 @@ def test_dashboard_single_bucket_delete_is_not_labeled_as_hard_delete():
     for rel in ("frontend/dashboard.html",):
         text = (ROOT / rel).read_text(encoding="utf-8")
 
-        assert "删除到档案" in text
+        assert "归档" in text
+        assert "bucketDelete(this.dataset.bucketId)" not in text
         assert "这将彻底删除此记忆桶" not in text
         assert "你真的要永久删除吗" not in text
         assert "彻底删除这封信" not in text
@@ -930,6 +931,7 @@ def test_mcp_token_regenerate_serializes_disk_and_runtime_commit_across_loops(
         {"dehydration": {"timeout_seconds": 0}},
         {"surfacing": {"breath_max_results": 0}},
         {"surfacing": {"breath_max_tokens": 499}},
+        {"surfacing": {"breath_max_tokens": 40001}},
         {"surfacing": {"feel_max_tokens": 20001}},
         {"surfacing": {"sampling": {"top_k": 0}}},
         {"surfacing": {"sampling": {"sample_k": 21}}},
@@ -993,7 +995,7 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
                 "host_port": "8123",
                 "surfacing": {
                     "breath_max_results": "11",
-                    "breath_max_tokens": "12000",
+                    "breath_max_tokens": "35000",
                     "feel_max_tokens": "7000",
                     "sampling": {
                         "enabled": True,
@@ -1012,14 +1014,14 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
     assert runtime["host_port"] == 8123
     assert runtime["surfacing"] == {
         "breath_max_results": 11,
-        "breath_max_tokens": 12000,
+        "breath_max_tokens": 35000,
         "feel_max_tokens": 7000,
     }
     assert persisted["merge_threshold"] == 42
     assert persisted["host_port"] == 8123
     assert persisted["surfacing"] == {
         "breath_max_results": 11,
-        "breath_max_tokens": 12000,
+        "breath_max_tokens": 35000,
         "feel_max_tokens": 7000,
         "sampling": {
             "enabled": True,
@@ -1394,3 +1396,56 @@ async def test_retired_purge_endpoint_never_deletes_memory(monkeypatch):
     assert response.status_code == 410
     assert payload["error"] == "physical_deletion_forbidden"
     assert "Markdown 文件会继续保留" in payload["message"]
+
+
+# ============================================================
+# 时区设置：只给日期不写时区时按它理解（Letter 定时锁等）
+# ============================================================
+
+@pytest.mark.asyncio
+async def test_timezone_persists_and_is_hot_applied(monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    runtime = {"transport": "streamable-http"}
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", runtime)
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest({"timezone": "America/New_York", "persist": True})
+    )
+    payload = _json(response)
+    persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert response.status_code == 200
+    assert "timezone" in payload["updated"]
+    assert persisted["timezone"] == "America/New_York"
+    # 时区是热更新项：不需要重启
+    assert config_api.sh.config["timezone"] == "America/New_York"
+
+
+@pytest.mark.asyncio
+async def test_invalid_timezone_is_rejected_instead_of_silently_falling_back(
+    monkeypatch, tmp_path
+):
+    """写进去一个解析不了的名字，之后每次解析日期都会静默回退 +08:00，
+    用户却以为自己设置成功了——必须当场拒绝。"""
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(config_api.sh, "config", {"transport": "streamable-http"})
+    monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
+    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    mcp = FakeMCP()
+    config_api.register(mcp)
+
+    response = await mcp.routes[("POST", "/api/config")](
+        JsonRequest({"timezone": "Nowhere/Fake", "persist": True})
+    )
+
+    assert response.status_code == 400
+    assert "无法识别时区" in _json(response)["error"]
+    assert not config_path.exists() or "timezone" not in (
+        yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    )

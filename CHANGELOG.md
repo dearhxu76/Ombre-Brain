@@ -2,6 +2,280 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 3.2.0
+
+> 施工单三步走完最后两步。3.0.0 只做了第一步（删减 8 个工具）就发布了，
+> 搬迁与加功能这两步一直挂着——`relation_store` 从 3.0.0 起写入侧是空的。
+
+### 变更 / Changed
+
+- **信件迁到 `/mcp-extra`。** `letter_write` / `letter_lock_update` / `letter_read`
+  从主连接器挪出，主连接器现在 13 个工具、`/mcp-extra` 3 个。
+  - **为什么**：没人在大脑里写信。写信是一个**行为**，不是一段记忆——它有收件人、
+    有时间锁，时间方向和记忆相反。放在一起模型会在该回忆的时候去翻信。
+  - `/mcp-extra` 2.8.5 起退役返回 404，本次恢复。**三处安全边界跟着工具一起过去**：
+    严格参数校验（否则新端点会变成"参数拼错也返回成功"的旁路，而 `letter_write`
+    能创建记忆）、请求体积限制、鉴权。原先断言"退役路径放行"的两条测试语义反转。
+- **dream 的 feel 段从"最近"改成"相关"。** 拿当次候选桶的合并文本当基准，
+  用 jieba 关键词（0.3）+ 向量相似度（0.7）打分，门槛 0.5，最多 5 条。
+  - 改之前这一段其实是「我最近写的感受」——最新的 feel 未必和这次在聊的事有关。
+  - 向量不可用时退回纯关键词并在段首明示降级；此时关键词**不按 0.3 缩放**，
+    否则门槛会变成事实上的 1.67，整段静默消失而不是降级。
+  - 单字 token 一律丢弃：「的」「了」「我」会让任意两段文字都有可观重合度。
+
+### 修复 / Fixed
+
+- **纯语义召回通道此前形同虚设，`vector_recall_threshold` 从 0.65 下调到 0.55。**
+  - **现象**：问「我的工作」，语义上相关的有 55 条，实际只返回 20 条。更极端的是
+    「同事」——语义相关 38 条，放宽 limit 也只有 3 条能过门。
+  - **原因**：代码里写着 `text_match or semantic_match`，但后一支**从来不为真**。
+    semantic 权重只占 2.5/13.5≈18.5%，一条桶哪怕相似度 0.9，单靠这一维也只贡献
+    约 16.7 分，离 `fuzzy_threshold=50` 差得远，必须同时在 topic（关键词重合）上
+    得分才过得去。而「我的工作」这几个字根本不会字面出现在记忆里。
+    **OB 名义上是混合检索，实际是纯关键词检索。**
+  - **依据**：对 917 桶真实记忆只读扫描，9 个宽泛查询在 0.65 下一共只有 1 条桶能
+    靠语义直通进来。0.55 处平均新增 8.6 条/查询，而双通道印证率**不降反升**到
+    88.3%——捞回的是"关键词也认、只是加权分被七维稀释掉"的桶；再往下印证率单调
+    劣化（0.45 时每查询 170 条、印证率 60%）。
+  - 新召回内容经人工逐条确认：面试、薪资与配得感、「上线成功那一刻的踏实感」——
+    都是该出现却一条都出不来的记忆。
+  - 现在是 `config.matching.vector_recall_threshold`，可按自己的语料调。
+  - **七维权重一个没动**：权重是可以互相补偿的，门不行。这次只校准门。
+
+- **核心准则与坐标系不可被消化。** `pinned` / `permanent` / `anchor` 桶不再因为
+  带着 `digested` 标记而从 `breath()`、被动漂浮、hook 注入与 dream 的核心准则池中消失。
+  - **现象**：12 条核心准则里 2 条带 `digested`，`breath()` 只返回 10 条。旁边还有
+    普通桶正常出现，看起来像被高权重普通桶挤掉了——实际上 pinned 本来就先扣预算
+    （12 条正文总共 3037 token，预算 10000，装得下），那 2 条压根没进候选。
+    这类静默缺失最难发现：不报错、不变慢，只是少了两条。
+  - ⚠️ **本条有意推翻 [2.8.4] 的决定**（`2784f41`「digested 桶从无参 breath、被动漂浮、
+    hook 与 dream 中硬过滤」），当时的回归测试明确断言「被消化的 pinned 记忆必须保持隐藏」。
+  - **为什么推翻**：`pinned` 是核心准则、`anchor` 是坐标系，**始终在场**才是它们存在的
+    意义。用 `digested` 让一条核心准则闭嘴，是在用一个标记掩盖另一个标记的错误——
+    不想让它一直在场，那它本来就不该是核心准则。
+  - **代价**：让核心准则安静下来的唯一办法变成取消 pinned（`trace(bucket_id, pinned=0)`）。
+    `trace` 的 `digested` 说明已同步这条边界。
+  - 普通记忆的 `digested` 行为**完全不变**，dream 的候选池也照常过滤。
+
+### 新增 / Added
+
+- **关系由后端自动建立，模型不感知。** `hold` / `grow` 新建桶后 fire-and-forget
+  推断关系，规则 + 向量，**不调 LLM**（写入路径上加 LLM 会拖慢 hold、多一个会失败
+  的外部依赖，而 relation 只是 hint）。
+  - 关联不是一个决定，是一个结果——我不会先想"要把这两段连起来"再去建立它，
+    是因为它们本来就连着，我只是发现。让模型显式调 `relation_attach` 等于把
+    一个"发现"改造成一个"操作"。
+  - 三档门槛：`same_event` ≥0.85 且 ≤6h、`continuation_of` ≥0.75 且 ≤72h、
+    `related_to` **≥0.72**。`caused_by` / `causes` / `custom` **永不自动建**——
+    因果需要语义理解，规则判不了，宁可不建也不能瞎建。
+  - 时间未知时不猜时间关系，降级 `related_to`：猜错的 `same_event` 比没有更糟。
+  - 每桶上限 8 条，超出按相似度保留最高的；**手动关系一条不动**（存量数据是人
+    当初明确建立的，不该被自动推断挤掉）。落库带 `auto: true` 便于区分与回滚。
+  - ⚠️ **`related_to` 从施工单原定的 0.65 上调到 0.72**，依据是对 917 桶真实记忆
+    的全量扫描：0.65 会建出 7,620 条关系、**47.8% 的桶撞上每桶上限**。一旦大面积
+    撞上限，阈值就形同虚设——决定挂哪几条的不再是"相关不相关"，而是"截断时谁排
+    前八"。0.72 下每桶中位 2 条、只有 3.5% 需要截断。扫描过程见施工单调整记录。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `3.2.0`。
+
+## 3.1.0
+
+### 新增 / Added
+
+- **新增引语（quotes）：在写入的那一刻，决定要不要原样记住某几句话。**
+  - `hold(quotes=[...])` 与 `grow(items=[{..., "quotes": [...]}])` 可以带上「当时说出口、并且当时就知道它重要」的那几句，原样存进桶的 frontmatter。
+  - **平时不返回。** `breath` / `dream` / catalog / `feel` 四条浮现路径都读不到它——这些路径本来就是白名单渲染，引语落在 metadata 而不是正文，是**结构上拿不到**，不是靠"记得别渲染"。
+  - **唯一出口是 `breath_search(query, quotes=True)`**：命中的桶里如果存过原话，会原样附在正文之后。没有任何工具能列出全部引语——必须先命中某条记忆，才拿得到它的引语。
+  - **上限每桶 3 条、每条 100 字，超限直接拒绝整次调用，不截断。** 截断过的引语已经不是原话，而「原样」正是这个功能存在的全部理由。上限本身是防退化约束：一段记忆里「当时就知道重要」的话不会多，多了说明是想存原文。
+  - 合并到已有桶时引语**追加不覆盖**（每条引语属于它自己的时刻），超上限时保留先来的并报 `OB-W006`（新增错误码），不静默丢弃。
+  - 引语**不进向量索引**：进了就等于可被检索，那离"可查"只剩一步，而可查正是 3.0.0 砍掉 `source_read` 的原因。
+  - `grow(content=...)` 的 digest 路径**不支持**引语：那些条目是 LLM 拆出来的，不是我逐条挑的。这个区分来自同一条判断标准——**谁决定记住**。
+  - **与已删除的 `source_read` 的区别不在存了什么，在谁决定记住、什么时候返回。** 原文层是"系统自动存全量、随时可查"，决定权在系统；引语是"我当时觉得这句重要所以记住了"，决定权在我，而且只在那一刻。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `3.1.0`。引语是向后兼容的新增功能，按语义化版本走次版本位；3.0.0 的镜像与 `v3.0.0` tag 保持原样，不含引语。
+
+## 3.0.0
+
+> 主版本号从 2.x 跳到 3.0.0：这一版删掉了 8 个公开 MCP 工具、改变了 `feel` 的调用契约
+> （从「全量返回」变成「必须带关键词」），对已经在用 2.x 的客户端是**破坏性变更**。
+> 上一个发布版本是 2.17.11；开发过程中曾用 2.18.0 作为内部版本号，从未发布。
+
+### 许可与项目文件 / Licensing & Project Files
+
+- **许可证仍为 [MIT](LICENSE)，`LICENSE` 文件未变。** 但清掉了一处长期存在的自相矛盾：此前 `LICENSE` 写 MIT（允许一切），`LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md` 却写「商业托管/转售需书面许可」（禁止商业），两份文件说的话相反，想认真用的人读不懂哪份算数，反而不敢用。
+  - `LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md` 改名为 [`NOTICE.md`](NOTICE.md) 并重写：不再是限制性条款，而是一份**没有法律约束力的请求** —— 保留出处、以及如果拿它做记忆服务，请让用户能随时完整导出自己的记忆。文件里明确写了「这不是条款，MIT 说了算，你完全可以不理会」。原 v2.4.0 内容折叠保留为历史记录，并注明其中的商业限制从未生效。
+  - README 顶部引用该 notice 的提示块已删除，License 段重写为 MIT 的实际含义 + 指向 `NOTICE.md` 和 `AUTHORS.md`。
+  - **为什么不改成 AGPL**：曾评估过 AGPL-3.0（能解决「改名转售且不公开改动」的问题），但对一个希望被自由使用的个人项目而言，AGPL 的传染性会挡住相当一部分正当使用者。「禁止商业使用」这类限制既挡不住真想绕的人，又劝退了本来会守规矩的人 —— 真正想要的从来不是控制权，所以改为把期望写在明处、不写进协议。
+- **新增 [`AUTHORS.md`](AUTHORS.md) 致谢文件。** 记录开发组成员；README 顶部致谢行加上指向链接。
+- **新增 DCO（Developer Certificate of Origin）与贡献指南。** 根目录新增 [`DCO`](DCO)（1.1 官方全文，逐字取自 developercertificate.org）、[`CONTRIBUTING.md`](CONTRIBUTING.md)，以及 `.github/PULL_REQUEST_TEMPLATE.md`。
+  - 提交时加 `-s`（`git commit -s`）自动附上 `Signed-off-by:` 行，即为签署。
+  - **DCO 不转让著作权** —— 贡献者写的代码依然属于贡献者，签署只声明「这段代码我有权提交」。与 CLA 的区别在于 DCO 不授予项目方再许可（sublicense）的权利，因此不构成商业双授权的基础。
+  - 选 DCO 而不是 CLA，是因为它对贡献者零摩擦、社区接受度高。代价是将来若需改变许可条款，仍须逐个联系历史贡献者取得同意。
+- 修复 `grow` 在脱水拆分耗时超过 MCP/客户端等待时间时出现“前端报失败、服务端仍已写入”，随后重试又生成重复记忆的问题。首个任务不再随调用方断开而取消；同一请求在短时间内重试时会复用进行中的任务或已完成结果，不再重复写入。真实失败不会缓存，之后仍可正常重试。
+- Dashboard 普通桶详情合并「归档」与「删除到档案」的人类入口：现在只显示「归档」，要求填写理由并进入 AI 审批；批准后沿用删除到档案语义写入 `deleted_at`。AI/系统内部的普通 `archive()` 与自动衰减行为保持不变。
+
+### 删除 / Removed
+
+- **工具精简：公开 MCP 工具从 23 个减到 15 个。** 工具数量本身会伤害可用性——claude.ai 在工具过多时改用 tool_search 延迟加载，按描述搜工具、命中带随机性；每个工具的 schema 与说明也都要占上下文。留下的每个工具都应该是不可替代的动作，同一动作的不同状态切换不该各占一个工具位。
+- **删除原文回顾的四个工具**：`source_read` / `source_attach` / `source_detach` / `source_restore`。原文证据层从此**只写不读**，模型没有任何回读入口，也无法后补或停用绑定。
+  - `hold(source_content=...)` 与 `grow(content=共享原文, items=[...])` 的写入路径不变，原文照常按 SHA-256 内容寻址存进 `_sources/`，照常进入本地备份与 GitHub 同步。保留原文是为了备份与导出的完整性，不是为了让模型回忆。
+  - ⚠️ **[ADR-0001](docs/adr/ADR-0001-source-evidence-layer.md) 中「`source_read` 是唯一公开读取入口」这句话已被本次变更取代**——现在是「无公开读取入口」。ADR 作为历史决策记录保持原样不改，当前行为以本条目与 `docs/INTERNALS.md` §3.3.1 为准。
+  - `breath` 与目录模式不再输出 `[source_available:true | ... | use:source_read]` 提示。不提示一个已不存在的入口，避免模型反复尝试调用已删除的工具。
+- **删除关系管理的四个工具**：`relation_read` / `relation_attach` / `relation_detach` / `relation_restore`。建立桶间关系是后端的活，不该占用模型的工具位和判断力。
+  - **读取侧不受影响**：`relation_hint()` 仍在 `breath` / 目录模式 / `dream` 三处被后端消费，存量关系照常展示。
+  - ⚠️ **写入侧当前是空的**：删掉 `relation_attach` 后没有任何入口能建立新关系，`relation_store` 暂时只有存量数据。后端自动建立尚未接线，接线前不会产生新关系。
+
+### 新增 / Added
+
+- **`feel(query)` 成为独立 MCP 工具，且不再全量返回。** 此前只能通过 `breath_advanced(domain="feel")` 读取，且会把所有 feel 按时间倒序倒出来。
+  - **`query` 必填**：feel 回答的是「我此刻在想的这件事，我以前怎么感受的」，不是一份可以整本翻的列表。feel 越攒越多时，无差别倒出既挤占上下文，也让这个真实问题淹没在时间序列里。
+  - 关键词走向量检索：`search_similar(query, allowed_bucket_ids=<全部 feel 桶>)` 把候选限定在 feel 内，相似度 **≥ 0.65**（与 `breath_search` 向量通道同一门槛）才算命中；排序先按相似度、再按时间倒序。
+  - 向量不可用或异常时退回关键词字面匹配，并在返回首行明确提示降级。
+  - 命中后逐字返回，不摘要不截断；未命中的一律不返回，也不用低相关的凑数。不给 query 时返回说明与示例，而不是倒出全部。
+  - `breath_advanced(domain="feel")` 与 `tags="feel"` 作为等价老路径保留，同样要求关键词。
+  - ⚠️ `surfacing.feel_max_tokens` 自此**只作用于 dream 的 feel 历史段**；`feel` 工具用自己的 `max_tokens`（默认 10000），且放不下时整条省略而非折叠成摘要。
+  - 公开工具数 15 → 16。**普通 `breath()`、`breath_search`、`importance_min` 三条路径均不返回 feel**（已实测：用 feel 正文中的独特词检索、以及 importance=10 的 feel 都无法命中）；catalog 目录模式仍会列出 feel 分区的元数据行（不含正文）。
+- **`timezone` 成为一级配置项**（`config.yaml`，默认 `Asia/Shanghai`，Dashboard「设置」可改）。用户只给日期、不写时区时按它理解。
+  - Letter 定时锁此前要求 `unlock_date` **必须带时区**（`2027-01-01` 直接被拒，只接受 `2027-01-01T00:00:00+08:00`），而 `breath_search` 的 `date_from/date_to` 却支持纯日期——同一个系统两套时间约定。现在纯日期与无时区时刻都按配置时区解释，显式带时区仍然优先。
+  - 时区名非法或运行环境缺少 IANA tzdata 时回退固定 `+08:00`，不让「解析一个日期」抛异常；但 Dashboard 保存时会**当场校验并拒绝**非法时区，避免用户以为设置成功、实际每次都在静默回退。
+  - `normalize_unlock_date` 的四条报错全部中文化，并给出可照抄的正确写法。
+
+### 修复 / Fixed（返回格式）
+
+- **`grow(items=[...])` 新建时返回 bucket_id 而不是标题**，而 `grow(content=...)` 返回标题。调用方拿到 12 位 hex 无法确认存进去的是什么，得再查一次目录。两条路径现已一致（标题正确落库，只是返回没用它）。
+- **`trace(hard_delete=True)` 在桶不存在时返回英文错误码** `永久删除失败: not_found`（另外三个错误分支都有中文文案，只有这个漏了）。
+- **`anchor` 失败文案缺标点**：`我没能把它锚住。找不到该记忆桶 当前 anchor: 0/24。` → `我没能把它锚住：找不到该记忆桶。当前 anchor: 0/24。`；`release` 的 `释放失败。` 一并改为与之对称的第一人称。
+- **Dashboard 里 `feel_max_tokens` 的前端默认值仍是 6000**，与后端调整后的 15000 不一致。
+
+### 保留 / Unchanged
+
+- `ombrebrain/storage/source_store.py` 与 `ombrebrain/storage/relation_store.py` 一行未改。删的是模型能调用的动作，不是数据本身。
+- 存量 `source_links` 的 detached 项、存量 relation 数据全部原样保留。
+
+### 修复 / Fixed
+
+- **`breath_advanced(domain="plan")` 返回核心准则而不是 plan。** `domain` 参数原本只在 catalog 模式和「有 query 的检索模式」里生效；plan 桶又被普通浮现排除。不带 query 调用时会直接落到浮现模式，于是返回权重最高的桶 + 置顶核心准则。叠加 dream 末尾 plan 段可能因总预算降级成只报条数，**plan 的正文一度没有任何读取入口**——只能看到「3 条」这个数字，内容一条都读不到。
+  - 新增 Plan 通道（`tools/breath/surface.py: surface_plans()`），与既有 Feel 通道同构：`domain="plan"` 直接拉所有 `type==plan && status==active` 桶，按 `created` 倒序逐字返回，不截断不摘要，已 resolved/abandoned 的不返回。**没有新增工具**，只补了一条 domain 分流。
+  - 回归测试见 `tests/test_breath_plan_channel.py`，四条断言覆盖：正文可读、不返回核心准则、排除非 active、不调用 LLM。
+- **dream 里「没有计划」和「plan 段被预算挤掉」长得一模一样。** 没有 active plan 时 plan 段整段静默消失，无法与降级区分。现在会明确输出「没有计划。」。
+- **dream 的 feel 历史段预算从 6000 提到 15000**（`surfacing.feel_max_tokens`）。原值下 feel 很容易被折叠成 40 字摘录。⚠️ 该项若已在 `config.yaml` 中显式设置，以配置值为准，改默认值不生效。
+- **Docker 部署下 `AI_NAME` 实际设不上。** `.env.example` 写明可以设，但 `deploy/docker-compose.yml` 的 environment 段从未透传它，而 `get_ai_name()` 只读环境变量——**后果是带锁 Letter 在 Docker 上完全无法创建**（报「未能从现有 ai_name / AI_NAME / author 中取得当前写信人的实际关系名」）。
+  - `ai_name` 现在是 `config.yaml` 的一级配置项，**优先级高于环境变量**：config 随 vault 持久化，容器重建/重启都不丢。默认留空表示「没配」，回退环境变量、再回退 `"AI"`，与旧行为一致。
+  - `get_ai_name()` 按 config 文件 mtime 缓存（它在一次 letter 请求里会被调用多次），改完配置立即生效、无需重启；配置缺失或损坏时静默回退而不抛异常——署名逻辑遍布 letter/prompt/Dashboard，不能因为配置坏掉就整条链路崩。
+  - `deploy/docker-compose.yml` 一并补上 `AI_NAME` 透传，让 `.env` 里的设置也能生效。
+- **`entrypoint.sh` 播种日志里的代码目录路径被 shell 吞掉。** 第 242 行 `播种代码到持久卷 $CODE_DIR：$RESEED_REASON` 中，`$CODE_DIR` 后面紧跟的全角「：」是多字节字符，shell 把它的首字节当成变量名的一部分，转而展开一个不存在的变量——**路径整个丢失**，并向 stdout 吐出半个字符（非法 UTF-8）。改用 `${CODE_DIR}` 明确边界。
+  - 后果不止是日志难看：运维看不到代码播种到哪个目录；`subprocess(text=True)` 读取启动输出时直接抛 `UnicodeDecodeError`，`tests/test_entrypoint_code_bootstrap.py` 中 4 个用例因此长期失败。修复后这 4 项全部转绿。
+- **镜像缺 `docs/adr/`、`tools/`、`kernel/`，三项系统诊断在任何 Docker 部署上恒红**（`adr_requirements` 报 docs/adr not found、`preflight_cli_diagnostics` 报 missing_files、`vnext_preflight` 的 `rust_kernel_scaffold` 契约失败）。
+  - `.dockerignore` 放行这三处、`Dockerfile` 补 COPY。
+  - `entrypoint.sh` 的播种清单同步扩展：新增可选目录 `SEED_DIRS_OPTIONAL="docs tools kernel"`。此前只播种 `src/`、`frontend/` 与三个 root 文件，而诊断读的是播种目标 `<vault>/_app`，因此光进镜像并不生效。可选目录一律「存在才处理」，老镜像缺失时不阻断启动；换代播种、失败回退与崩溃回滚（`_prev`）三条路径都同步覆盖，回滚后运行时树与回滚点保持一致，不残留新镜像带来的目录。
+  - 修复后 `preflight_cli_diagnostics` 与 `vnext_preflight`（28 项全通过）转绿。
+  - ⚠️ **`adr_requirements` 仍为 error，但原因已不同**：目录现在能读到了，暴露出 `docs/adr/ADR-0003-unified-human-archive-entry.md` 自身缺 6 个必需边界章节（`Why this is not cognition`、`Why this is not a database feature`、`How forgetting still works`、`How tombstones are preserved`、`How present thinking remains with the LLM`、`Rejected alternatives`）。ADR-0001/0002 均合格。该文档需由其作者补齐，本次未改动。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `3.0.0`。
+
+## 2.17.11
+
+### 改进 / Changed
+
+- Relation MCP 可发现性补强：`relation_attach.relation_type` 直接以 schema enum 暴露六种固定类型与 `custom`，四个 Relation 工具的公开说明补齐 ID-first、方向语义、双向镜像、稳定 slot、detached/title 展开和 legacy 行为，避免调用方靠猜测参数。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.17.11`。
+
+## 2.17.10
+
+### 改进 / Changed
+
+- Relation 改为 ID-first 的天然双向关系：新建关系在两个普通桶各写一个共享 `relation_id` 的镜像视图，固定六型自动使用 `caused_by↔causes`、`continuation_of↔continues` 及两个对称类型的反向语义；新增 `custom` 类型，仅 custom 使用 `label/reverse_label`，未给 reverse 时默认沿用正向 label。
+- `expected_title` 从四个 Relation 工具的必填门槛降为可选校验；`relation_read` 默认只返回 active 的极简 ID ledger，可按需展开目标当前标题或 detached 历史。breath/dream/catalog 的 Relation hint 仍最多展示两条 active 关系，但现在会显式提示剩余条数。
+- 新双向 Relation 的 detach/restore 会在有序双桶锁内同步两端镜像；旧 V1 无 `relation_id` 的单向关系不批量迁移，继续保持可读、可原位 detach/restore 的兼容行为。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.17.10`。
+
+## 2.17.9
+
+### 修复 / Fixed
+
+- 修复 Claude `conversations.json` 被裸结构化记忆 JSON 预检误判的问题；带有
+  `chat_messages`、`mapping` 或 `messages` 的会话信封现在交由既有对话格式识别，
+  合法裸结构化记忆列表的直接导入兼容行为保持不变。
+
+### 测试 / Tests
+
+- 新增 Claude 官方 `chat_messages` 结构的预检回归测试，并保留裸结构化记忆列表测试。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.17.9`。
+
+## 2.17.8
+
+### 新增 / Added
+
+- 新增 Relation V1：普通记忆桶之间可建立一跳有向关系，使用稳定 1-based slot 的 `relation_links` ledger，并提供 `relation_attach`、`relation_read`、`relation_detach`、`relation_restore` 四个公开工具；detach/restore 可逆且不压缩 slot。
+- 内置六种机器关系 `caused_by` / `causes` / `continuation_of` / `continues` / `related_to` / `same_event`，默认显示为「原因 / 结果 / 前段 / 后续 / 相关 / 同一事件」；可选自定义 label 最多 20 字符，只改变展示语义，不新增 machine type。
+- breath 与 catalog 在已选中的普通桶后追加最多两条极简 Relation hint；dream 仅在近期普通记忆块展示 Relation。Relation 不读取目标标题或正文，也不参与候选生成、排序、embedding、activation、decay 或递归图遍历。
+
+### 兼容与安全 / Compatibility & Safety
+
+- Relation V1 仅连接普通记忆桶；归档普通桶仍保留并可管理关系，归档后的 plan / feel / I / letter 等特殊桶仍保持拒绝边界。
+- 备份导入的 keep_both 会重写包内 Relation 目标 ID；若包内目标未成功导入，则保留 stable slot 并原位 detached，避免误连到本地同 ID 旧桶。畸形 Relation metadata、非法 type、换行或超长 label 均 fail-closed。
+
+### 测试 / Tests
+
+- 扩展 Relation ledger、稳定 slot、方向性、自环、特殊桶、归档、active 上限、tiny manifest、breath/dream 渲染、公开 MCP schema 与 migration remap 回归；本地工程桥验证继续通过，Python/pytest 由 CI 执行权威验证。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.17.8`。
+
+## 2.17.7
+
+### 新增 / Added
+
+- 新增可逆的 Source 证据绑定层：持久化有序 `source_links`，并继续维护既有 `source_refs` 作为 active 兼容投影；同一 Source blob 可安全复用到多个桶，detach/restore 只改变绑定状态，不复制或改写原始证据。
+- 新增 `source_attach`、`source_detach`、`source_restore` 三个公开工具；slot 采用稳定的 1-based 位置，detach 后不压缩、不重排，restore 回到原 slot。
+- `source_read` 支持 `source_slots` 与 `all_sources`。多 Source 默认只返回极简 manifest，显式选择后才读取正文，避免一次拉取把上下文预算读满。
+
+### 兼容与安全 / Compatibility & Safety
+
+- 旧桶仅有 `source_refs` 时继续可读，并可按原顺序解释为 active links；新建/追加时同步维护两套字段。active 绑定上限保持 32，总 ledger 上限 128，超限显式拒绝，不静默丢弃。
+- Source attach/detach/restore 不改变桶正文、标签、domain、importance、生命周期、recency 或 embedding；归档桶可管理证据绑定，但不会借 Source restore 复活桶生命周期。锁定 Letter 继续拒绝 AI 修改。
+- 备份/迁移闭包同时收集 active 与 detached Source 引用，且在 `source_refs` / `source_links` 并存时取并集，防止证据遗漏。
+
+### 测试 / Tests
+
+- 扩展 Source 层、公开工具 schema、MCP 集成与服务器工具列表回归，覆盖共享不可变 Source、legacy 投影、稳定 slot、detach/restore 幂等、容量预检、单 detached manifest、备份闭包与不触发派生索引等边界。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.17.7`。
+
+## 2.17.6
+
+### 修复 / Fixed
+
+- 修复 `breath()` 无参浮现时的 pin 预算优先级：只要有任一核心准则因 token 预算不足无法整桶返回，本轮普通浮现、久未浮现与偶然想起全部跳过，避免普通记忆挤占核心准则预算。
+- 核心准则继续保持“整桶返回或整桶省略”，不截断、不摘要；当所有 pin 均能装入预算时，普通浮现原有排序、采样与预算行为保持不变。
+- 保持 breath 默认预算不变，仅将显式 `max_tokens` / `surfacing.breath_max_tokens` 的安全上限提高到 40000，为重度使用者提供 opt-in headroom。
+
+### 测试 / Tests
+
+- 新增回归覆盖 pin 被预算省略时普通记忆必须全部跳过，以及全部 pin 装入后普通记忆仍可正常返回；同时清理 `tests/test_dream_prompt_boundary.py` 中已知的 Ruff F841 无用变量。
+
+### 版本 / Version
+
+- 根目录 `VERSION` 与 `src/VERSION` 同步更新为 `2.17.6`。
+
 ## 2.17.5
 
 ### 修复 / Fixed

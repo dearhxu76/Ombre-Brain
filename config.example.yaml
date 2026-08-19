@@ -20,6 +20,24 @@ transport: "stdio"
 deployment:
   public_url: ""  # e.g. "https://ob.example.com"
 
+# --- AI display name / AI 一方的显示名 ---
+# 用于 letter 署名、prompt 与面向用户的文案，避免硬编码具体模型名。
+# 留空 = 没配：此时回退到环境变量 AI_NAME，仍为空则用 "AI"。
+# 写在这里的值随 vault 一起持久化，容器重建/重启都不会丢；
+# 环境变量则依赖 compose 逐个透传，漏一个就会静默退回默认名。
+# Display name for the AI side (letter signatures, prompts, user-facing text).
+# Empty = unset: falls back to the AI_NAME env var, then to "AI".
+ai_name: ""
+
+# --- Timezone / 时区 ---
+# 用户只给日期、不写时区时（例如 Letter 定时锁的 unlock_date="2027-01-01"），
+# 按这个时区理解成当地那一天的 00:00。留空 = Asia/Shanghai（东八区）。
+# 用 IANA 时区名（Asia/Shanghai、UTC、America/New_York…）；名字非法或运行环境
+# 缺少 tzdata 时回退固定 +08:00，不会因此报错。Dashboard「设置」里可改。
+# IANA timezone name used to interpret date-only input (e.g. Letter unlock_date).
+# Empty = Asia/Shanghai. Falls back to a fixed +08:00 when unresolvable.
+timezone: "Asia/Shanghai"
+
 # --- Log level / 日志级别 ---
 log_level: "INFO"
 
@@ -157,6 +175,12 @@ scoring_weights:
 # --- Fuzzy matching / 模糊匹配参数 ---
 matching:
   fuzzy_threshold: 50             # Minimum match score (0-100) / 最低匹配分数
+  # 纯语义候选进入结果池的最低余弦相似度（默认 0.55）。
+  # 一条记忆哪怕一个关键词都不沾，只要语义相似度到这个数就能被检索到——
+  # 「问我的工作」这类查询全靠它，因为"我的工作"四个字不会字面出现在记忆里。
+  # 调高：召回更准但更少；调低：捞得更多但开始混进噪音。
+  # 3.2.0 从 0.65 下调到 0.55，依据见 src/bucket_manager.py 的扫描记录。
+  vector_recall_threshold: 0.55
   max_results: 5                  # Max results per search / 单次搜索最多返回条数
 
 # --- Surfacing defaults / 浮现默认参数 ---
@@ -165,8 +189,8 @@ matching:
 # AI 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
 surfacing:
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
-  breath_max_tokens: 10000        # 500-20000, total token cap per breath
-  feel_max_tokens: 6000           # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  breath_max_tokens: 10000        # 500-40000, total token cap per breath; 40000 is a safety ceiling, not the default
+  feel_max_tokens: 15000          # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
   # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
   # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。
   # 测试 fixture 里默认关 (enabled=false)，保证排序确定。生产可以开。

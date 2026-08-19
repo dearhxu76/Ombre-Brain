@@ -920,14 +920,98 @@ def get_version() -> str:
     return "0.0.0+unknown"
 
 
+# (config_path, mtime, value)。get_ai_name() 在一次 letter 请求里会被调用多次，
+# 每次都读盘 + 抢 _config_yaml_lock 不划算；按 mtime 缓存，配置改了自动失效。
+_ai_name_cache: tuple[str, float, str] | None = None
+
+
+def _config_ai_name() -> str:
+    """从 config.yaml 读 `ai_name`；读不到、为空或配置损坏都返回空串。
+
+    这里绝不能抛异常：署名逻辑遍布 letter / prompt / Dashboard，
+    配置文件坏掉时应该退回环境变量，而不是让整条链路崩掉。
+    """
+    global _ai_name_cache
+    try:
+        config_path = config_file_path()
+        try:
+            mtime = os.path.getmtime(config_path)
+        except OSError:
+            return ""
+        cached = _ai_name_cache
+        if cached is not None and cached[0] == config_path and cached[1] == mtime:
+            return cached[2]
+        value = str(read_config_yaml().get("ai_name") or "").strip()
+        _ai_name_cache = (config_path, mtime, value)
+        return value
+    except Exception:
+        return ""
+
+
+# 未配置时的默认时区。选东八区而不是 UTC：OB 的使用者在中国大陆，
+# 「2027-01-01 解锁」按本地日期理解才符合直觉。
+# 时区这东西一碰就头疼。写完这段去泡了杯茶，回来忘了自己写到哪。
+# 其实青柑普洱挺好喝的
+_DEFAULT_TIMEZONE = "Asia/Shanghai"
+_DEFAULT_UTC_OFFSET_HOURS = 8
+_timezone_cache: tuple[str, float, str] | None = None
+
+
+def get_timezone_name() -> str:
+    """config.yaml 的 `timezone`；未配置或读不到时回退 Asia/Shanghai。
+
+    与 ai_name 同一套 mtime 缓存策略：它会在每次解析用户给的日期时被调用，
+    不适合每次都读盘 + 抢配置锁。
+    """
+    global _timezone_cache
+    try:
+        config_path = config_file_path()
+        try:
+            mtime = os.path.getmtime(config_path)
+        except OSError:
+            return _DEFAULT_TIMEZONE
+        cached = _timezone_cache
+        if cached is not None and cached[0] == config_path and cached[1] == mtime:
+            return cached[2]
+        value = str(read_config_yaml().get("timezone") or "").strip() or _DEFAULT_TIMEZONE
+        _timezone_cache = (config_path, mtime, value)
+        return value
+    except Exception:
+        return _DEFAULT_TIMEZONE
+
+
+def get_tzinfo():
+    """把配置的时区名解析成 tzinfo。
+
+    时区名非法、或运行环境缺少 IANA tzdata 时，回退到固定的 +08:00——
+    宁可用一个明确的偏移，也不要让「解析一个日期」这种小事抛异常。
+    """
+    # 想养蛇，python 算蛇吗但是…算了。
+    from datetime import timedelta, timezone as _timezone
+
+    name = get_timezone_name()
+    try:
+        from zoneinfo import ZoneInfo
+
+        return ZoneInfo(name)
+    except Exception:
+        return _timezone(timedelta(hours=_DEFAULT_UTC_OFFSET_HOURS))
+
+
 def get_ai_name() -> str:
     """AI 一方的显示名 / display name for the AI side.
 
-    取自环境变量 `AI_NAME`，未设置或为空时回退到 "AI"。面向用户的文本
-    （prompt / UI / 错误信息）、letter 署名都用它，避免硬编码具体模型名。
-    Read from the `AI_NAME` env var; falls back to "AI" when unset/empty.
+    优先级：`config.yaml` 的 `ai_name` → 环境变量 `AI_NAME` → 回退 "AI"。
+
+    config 排在环境变量前面，是因为它跟着 vault 一起持久化：Docker 下
+    config.yaml 在挂载目录里，**容器重建/重启都不会丢**；而环境变量得靠
+    compose 逐个透传，漏一个这边就静默退回默认名。配置里默认留空，
+    表示「没配」，此时行为与改动前完全一致。
+
+    面向用户的文本（prompt / UI / 错误信息）、letter 署名都用它，
+    避免硬编码具体模型名。
     """
-    return os.environ.get("AI_NAME", "").strip() or "AI"
+    return _config_ai_name() or os.environ.get("AI_NAME", "").strip() or "AI"
 
 
 def get_owner_name() -> str:

@@ -45,6 +45,7 @@ from utils import normalize_memory_title, now_iso, parse_bool
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
+from ._relation_link import link_new_bucket
 
 _EMBED_WARN = (
     "向量暂未完成，该桶当前仅支持关键词匹配；正文已保存。"
@@ -70,6 +71,10 @@ _WHY_REMEMBERED_MAX_CHARS = 500
 _GROW_ITEM_FIELDS = frozenset({
     "content", "title", "name", "tags", "importance", "domain",
     "valence", "arousal", "source_ranges", "why_remembered",
+    # quotes 只在 grow(items=[...]) 这条路上有效：items 是我自己拆好的，
+    # 每条都经过我的手。digest 路径（grow(content=...)）拆出来的条目是 LLM
+    # 的产物，我没有逐条决定过——那里不该有引语，见架构说明 §5.2「谁决定」。
+    "quotes",
 })
 
 # --- importance 审计范围排除的类型（is_importance_audit_candidate 复用）---
@@ -354,6 +359,13 @@ def check_grow_items_payload(items: list) -> str | None:
                 raw_text = item.get(field)
                 if raw_text is not None and not isinstance(raw_text, str):
                     return f"grow items 第 {index} 项 {field} 必须是字符串。"
+            if item.get("quotes") not in (None, "", []):
+                from ombrebrain.storage.quote_store import normalize_quotes
+
+                try:
+                    normalize_quotes(item["quotes"])
+                except ValueError as exc:
+                    return f"grow items 第 {index} 项引语无效，未创建任何桶：{exc}"
             try:
                 normalize_memory_title(item.get("title"))
             except ValueError as exc:
@@ -796,6 +808,7 @@ async def merge_or_create(
     name: str = "",
     title: str = "",
     source_refs: list | None = None,
+    quotes: list | None = None,
     raw_merge: bool = False,
     why_remembered: str = "",
     merge_why_remembered: str = "",
@@ -827,7 +840,7 @@ async def merge_or_create(
         result = await _merge_or_create_inner(
             content=content, tags=tags, importance=importance, domain=domain,
             valence=valence, arousal=arousal, name=name, title=title,
-            source_refs=source_refs, raw_merge=raw_merge,
+            source_refs=source_refs, quotes=quotes, raw_merge=raw_merge,
             why_remembered=why_remembered,
             merge_why_remembered=merge_why_remembered,
             source_tool=source_tool,
@@ -858,6 +871,7 @@ async def _merge_or_create_inner(
     name: str = "",
     title: str = "",
     source_refs: list | None = None,
+    quotes: list | None = None,
     raw_merge: bool = False,
     why_remembered: str = "",
     merge_why_remembered: str = "",
@@ -1022,6 +1036,11 @@ async def _merge_or_create_inner(
                             update_kwargs["name"] = title
                     if source_refs:
                         update_kwargs["source_refs_append"] = source_refs
+                    if quotes:
+                        # 合并到已有桶时引语追加，不覆盖：每条引语属于它自己的时刻，
+                        # 不因为两段记忆被判定为同一件事就作废。超上限的处理见
+                        # BucketManager._merge_quotes（丢弃并 OB-W006 明说）。
+                        update_kwargs["quotes_append"] = quotes
                     if source_tool:
                         update_kwargs["last_merged_by"] = source_tool
                     # grow digest 在首次拆条时还没有稳定的目标桶，
@@ -1140,6 +1159,7 @@ async def _merge_or_create_inner(
             media=media,
             test_data=test_data,
             source_refs=source_refs,
+            quotes=quotes,
             defer_derived_index=_defer_derived_index,
             # hold 的铁律：正文优先落盘。打标/embedding 可降级，但绝不压缩或撤销记忆。
             allow_embedding_fallback=(raw_merge and source_tool == "hold"),
@@ -1258,6 +1278,12 @@ async def _merge_or_create_inner(
         f"source_tool={source_tool or '_'} grow_batch_id={grow_batch_id or '_'} "
         f"embedding_state={embedding_state}"
     )
+    # 自动建立桶间关系：fire-and-forget，写入返回不等它。
+    # 只在**新建**时触发——合并进已有桶时那条桶的关系已经建过了，
+    # 重复推断只会反复撞每桶上限。关系建不出来不影响记忆本身。
+    if not test_data:
+        asyncio.create_task(link_new_bucket(bucket_id, content))
+
     return bucket_id, False, embed_warn
 
 

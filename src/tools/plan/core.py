@@ -35,7 +35,7 @@ from .._common import (
     check_metadata_size,
     check_query_size,
 )
-from utils import strip_wikilinks, get_ai_name, get_owner_name
+from utils import strip_wikilinks, get_ai_name, get_owner_name, get_tzinfo, get_timezone_name
 from errors import safe_error_detail
 
 
@@ -63,16 +63,27 @@ def normalize_unlock_date(lock_type: str, value: object, *, now: datetime | None
         return PERMANENT_UNLOCK_DATE
     raw = str(value or "").strip()
     if not raw:
-        raise ValueError("timed lock requires unlock_date as a future ISO 8601 datetime")
+        raise ValueError(
+            "定时锁需要 unlock_date，且必须是未来的时间。"
+            "可以写日期（2027-01-01），也可以写完整时刻（2027-01-01T09:00:00+08:00）。"
+        )
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ValueError("unlock_date must be a valid ISO 8601 datetime") from exc
+        raise ValueError(
+            f"解锁时间「{raw}」看不懂。需要 YYYY-MM-DD 或 ISO 8601，"
+            "例如 2027-01-01 或 2027-01-01T09:00:00+08:00。"
+        ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("unlock_date must include an explicit timezone")
+        # 没写时区就按配置时区理解——「2027-01-01 解锁」指的是本地那一天，
+        # 不该因为部署在哪台机器上而漂移。时区配置见 config.yaml 的 timezone。
+        parsed = parsed.replace(tzinfo=get_tzinfo())
     current = now or datetime.now(timezone.utc)
     if parsed.astimezone(timezone.utc) <= current.astimezone(timezone.utc):
-        raise ValueError("unlock_date must be in the future")
+        raise ValueError(
+            f"解锁时间「{parsed.isoformat()}」不在未来。"
+            f"未写时区的日期按 {get_timezone_name()} 理解，请给一个更晚的时间。"
+        )
     return parsed.isoformat()
 
 
@@ -582,13 +593,23 @@ async def letter_read(
                 allowed_bucket_ids=allowed_ids,
             )
             id_score = {bid: sc for bid, sc in sims}
-            vector_matches = [b for b in letters if b["id"] in id_score]
-            if vector_matches:
-                letters = vector_matches
-                letters.sort(key=lambda b: id_score.get(b["id"], 0.0), reverse=True)
-            else:
-                letters = [b for b in letters if _matches_query(b)]
-                letters.sort(key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""), reverse=True)
+            # 字面精确命中与语义相似取并集，且字面优先。
+            # 此前只要向量返回任何结果就整体替换候选集，字面匹配被完全跳过；
+            # search_similar 在这里不设相似度门槛，于是搜一个确切的词组时，
+            # 真正含它的那封信可能被一堆低相关结果挤出 top_k——信里明明写着，
+            # 却搜不到，而且只在启用向量时才犯病。
+            # 救命怎么又冒出来六个 bug
+            literal_matches = [b for b in letters if _matches_query(b)]
+            literal_ids = {b["id"] for b in literal_matches}
+            literal_matches.sort(
+                key=lambda b: b["metadata"].get("letter_date") or b["metadata"].get("created", ""),
+                reverse=True,
+            )
+            vector_matches = [
+                b for b in letters if b["id"] in id_score and b["id"] not in literal_ids
+            ]
+            vector_matches.sort(key=lambda b: id_score.get(b["id"], 0.0), reverse=True)
+            letters = literal_matches + vector_matches
         except Exception as e:
             rt.logger.warning(f"letter_read vector search failed: {e}")
             letters = [b for b in letters if _matches_query(b)]

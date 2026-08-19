@@ -36,6 +36,8 @@ from errors import safe_error_detail
 
 
 async def anchor_set(bucket_id: str) -> str:
+    # 24 这个数字没什么道理，就是觉得再多就不叫锚了。
+    # 人能同时抓住的东西本来也没那么多。
     bucket_id = "" if bucket_id is None else str(bucket_id)
     metadata_err = check_metadata_size(bucket_id=bucket_id)
     if metadata_err:
@@ -44,7 +46,7 @@ async def anchor_set(bucket_id: str) -> str:
         rt.mark_op("anchor")
     result = await rt.bucket_mgr.set_anchor(bucket_id, True)
     if not result["ok"]:
-        return f"我没能把它锚住。{result.get('error', '未知错误')} 当前 anchor: {result.get('count', '?')}/{result.get('limit', 24)}。"
+        return f"我没能把它锚住：{result.get('error', '未知错误')}。当前 anchor: {result.get('count', '?')}/{result.get('limit', 24)}。"
     if result.get("noop"):
         return f"它已经是 anchor 了。当前 {result['count']}/{result['limit']}。"
     return f"我把它放进 anchor 了。它现在是坐标系的一部分，不会被默认浮现挤进上下文。当前 {result['count']}/{result['limit']}。"
@@ -59,7 +61,7 @@ async def anchor_release(bucket_id: str) -> str:
         rt.mark_op("release")
     result = await rt.bucket_mgr.set_anchor(bucket_id, False)
     if not result["ok"]:
-        return f"释放失败。{result.get('error', '未知错误')}"
+        return f"我没能把它移开：{result.get('error', '未知错误')}。"
     if result.get("noop"):
         return f"它本来就不是 anchor。当前 {result['count']}/{result['limit']}。"
     return f"我把它从 anchor 移开了。它会重新参与默认浮现。当前 {result['count']}/{result['limit']}。"

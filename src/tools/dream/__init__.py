@@ -52,7 +52,7 @@ async def dispatch(
     connection_hint = await build_connection_hint(recent)
     crystal_hint = await build_crystal_hint(all_buckets)
 
-    final_text = format_dream_output(
+    final_text = await format_dream_output(
         recent=recent,
         all_buckets=all_buckets,
         window_hours=window_hours,

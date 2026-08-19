@@ -201,9 +201,10 @@ async def test_hook_hides_digested_core_and_ordinary_memories(monkeypatch):
     dehydrator = _EchoDehydrator()
     buckets = [
         _bucket("visible-core", "Visible core memory.", pinned=True),
+        # 3.2.0 起：核心准则不可被消化，hook 注入也一样。
         _bucket(
             "digested-core",
-            "Digested core memory must stay hidden.",
+            "Digested core memory must stay visible.",
             pinned=True,
             digested=True,
         ),
@@ -221,8 +222,11 @@ async def test_hook_hides_digested_core_and_ordinary_memories(monkeypatch):
     assert response.status_code == 200
     assert "Visible core memory" in text
     assert "Visible ordinary memory" in text
-    assert "Digested core memory" not in text
     assert "Digested ordinary memory" not in text
+    # ⚠️ 3.2.0 有意推翻 2.8.4：pinned 桶带 digested 时仍然注入。
+    # 核心准则的意义就是始终在场；要让它安静，取消 pinned 而不是消化它。
+    assert "Digested core memory" in text
+    # 本仓库的 hook 复用默认 breath，正文由 breath 自己渲染，不再单独脱水。
     assert dehydrator.calls == 0
 
 

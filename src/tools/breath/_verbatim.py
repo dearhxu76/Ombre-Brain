@@ -4,6 +4,7 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
+from ombrebrain.storage.relation_store import relation_hint
 from utils import count_tokens_approx, strip_wikilinks
 
 
@@ -48,6 +49,9 @@ def render_stored_bucket(
     content = strip_wikilinks(stored_bucket_content(bucket))
     miss_block = _miss_block(bucket)
     rendered = f"{metadata_header}{miss_block}\n{content}"
+    hint = relation_hint(bucket)
+    if hint:
+        rendered += f"\n{hint}"
     if footprint:
         rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)

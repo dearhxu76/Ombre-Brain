@@ -673,6 +673,35 @@ def install_runtime_lifespan(app: Any, lifecycle: RuntimeLifecycle) -> Any:
     return app
 
 
+def install_extra_connector(app: Any, mcp_extra: Any) -> Any:
+    """把第二个 MCP 连接器（/mcp-extra）并进主 app。
+
+    两件事必须一起做，少一件就是坏的：
+
+    1. **路由并入**——`streamable_http_app()` 生成的 Starlette 里只有一条
+       `Route(streamable_http_path, ...)`，把它挪进主 app 就能对外服务。
+    2. **session manager 的生命周期并入**——FastMCP 的 lifespan 是
+       `session_manager.run()`。只搬路由不搬生命周期，`/mcp-extra` 会在第一次
+       请求时因为 session manager 没启动而炸，而且是运行时才炸，不是启动时。
+
+    包装顺序：extra 的 session manager 在**外层**，主 app 原有 lifespan 在内层。
+    这样两者的启动/关闭都成对，任何一侧异常都不会留下半启动的 manager。
+    """
+    extra_app = mcp_extra.streamable_http_app()
+    app.router.routes.extend(extra_app.router.routes)
+
+    parent_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan_with_extra(lifespan_app: Any):
+        async with mcp_extra.session_manager.run():
+            async with parent_lifespan(lifespan_app):
+                yield
+
+    app.router.lifespan_context = lifespan_with_extra
+    return app
+
+
 def build_http_app(
     mcp: Any,
     transport: str,
@@ -681,6 +710,7 @@ def build_http_app(
     token_validator: TokenValidator,
     lifecycle: RuntimeLifecycle,
     static_token_validator: TokenValidator | None = None,
+    mcp_extra: Any = None,
 ) -> Any:
     """Build the HTTP (streamable-http) ASGI app with one consistent middleware stack."""
 
@@ -690,6 +720,11 @@ def build_http_app(
         raise ValueError(f"HTTP app cannot be built for transport: {transport}")
 
     mcp_path_matcher = is_mcp_endpoint_path
+
+    # 先并入 /mcp-extra，再装 runtime lifespan：runtime 落在最内层，
+    # 保证它启动时两个连接器的 session manager 都已就绪。
+    if mcp_extra is not None:
+        install_extra_connector(app, mcp_extra)
 
     install_runtime_lifespan(app, lifecycle)
     app.add_middleware(

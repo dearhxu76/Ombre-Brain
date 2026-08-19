@@ -71,6 +71,8 @@ async def grow_core(content: str, test_data: bool = False) -> str:
     # dashboard 可按 grow_batch_id 聚合显示「这次日记一共归档了哪些事件」。
     # 用 12 位 hex 与 bucket_id 长度对齐，加 g_ 前缀方便人眼区分。
     batch_id = f"g_{uuid.uuid4().hex[:12]}"
+    # 写到这里饿了。
+    # 鸡公煲好美味
 
     async def _process_item(item: dict) -> dict:
         """处理 digest 拆出的一条独立 item，返回结构化结果供 gather 后汇总。"""
@@ -273,6 +275,7 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
                 why_remembered=why_remembered,
                 merge_why_remembered=why_remembered,
                 source_refs=source_refs,
+                quotes=item.get("quotes") or None,
                 source_tool="grow",
                 grow_batch_id=batch_id,
                 raw_merge=True,  # 逐字追加，合并不压缩
@@ -282,7 +285,10 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
             rt.logger.warning(f"grow items 条目处理失败 / verbatim item failed: {e}")
             return {"line": "⚠️"}
         return {
-            "line": f"📎{result_name}" if is_merged else f"📝{result_name}",
+            # 新建时回标题而不是 bucket_id：与 digest 路径保持一致。
+            # 之前这里回 12 位 hex，调用方光看返回无法确认存进去的是什么，
+            # 还得再查一次目录——同一个工具的两条路径不该一条人能读、一条不能。
+            "line": f"📎{result_name}" if is_merged else f"📝{final_title or result_name}",
             "merged": is_merged,
             "embed_warn": embed_warn,
             "dup_check": None if is_merged else (result_name, content_str),
@@ -318,5 +324,5 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
     if metadata_fallback:
         summary += "\n⚠️ 打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。"
         if any(not (item.get("title") or "").strip() for item in clean):
-            summary += " 无标题的桶需先在 Dashboard 设置标题，才能用 source_read 核对原文。"
+            summary += " 无标题的桶需先在 Dashboard 设置标题。"
     return summary

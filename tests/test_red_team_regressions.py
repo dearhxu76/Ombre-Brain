@@ -254,13 +254,19 @@ async def test_mcp_body_limit_rejects_declared_and_chunked_payloads():
 
 
 @pytest.mark.asyncio
-async def test_mcp_body_limit_does_not_treat_retired_mcp_extra_as_live_mcp():
+async def test_mcp_body_limit_covers_restored_mcp_extra():
+    """/mcp-extra 自 3.2.0 恢复为信件连接器，必须和 /mcp 一样受体积限制。
+
+    2.8.5 到 3.1.0 之间它是退役路径，中间件放行让请求落到 router 拿 404——
+    那时放行是对的。恢复之后如果还放行，超大 body 就能绕过限制直达
+    JSON-RPC 解析，成为一条免检的写入通道（letter_write 会创建记忆）。
+    """
     calls = []
     sent = []
 
     async def app(scope, _receive, send):
         calls.append(scope["path"])
-        await send({"type": "http.response.start", "status": 404, "headers": []})
+        await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
     async def receive():
@@ -281,8 +287,9 @@ async def test_mcp_body_limit_does_not_treat_retired_mcp_extra_as_live_mcp():
         send,
     )
 
-    assert calls == ["/mcp-extra"]
-    assert sent[0]["status"] == 404
+    # 超限请求必须在中间件层被挡下，不得进入下游
+    assert calls == []
+    assert sent[0]["status"] == 413
 
 
 def test_write_memory_uses_structured_frontmatter_and_atomic_output(tmp_path, monkeypatch):

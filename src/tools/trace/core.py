@@ -423,7 +423,10 @@ async def trace_core(
             return "拒绝永久删除：必须提供非空 delete_reason；本次未删除、未归档。"
         if result.get("error") == "delete_reason_too_long":
             return "拒绝永久删除：delete_reason 不能超过 500 个字符；本次未删除、未归档。"
-        return f"永久删除失败: {result.get('error', 'unknown_error')}"
+        if result.get("error") == "not_found":
+            return f"未找到记忆桶: {bucket_id}；本次未删除、未归档。"
+        # 兜底保留原始错误码便于排查，但不能只甩一个英文码给调用方。
+        return f"永久删除失败：{result.get('error', 'unknown_error')}；本次未删除、未归档。"
 
     if delete:
         success = await rt.bucket_mgr.delete(bucket_id)

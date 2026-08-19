@@ -30,15 +30,12 @@ EXPECTED_TOOLS = {
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
     "trace",
     "anchor",
     "release",
     "pulse",
     "plan",
-    "letter_write",
-    "letter_lock_update",
-    "letter_read",
+    "feel",
     "I",
     "dream",
 }
@@ -48,22 +45,19 @@ EXPECTED_TOOL_ORDER = (
     "breath_advanced",
     "hold",
     "grow",
-    "source_read",
     "trace",
     "dream",
     "anchor",
     "release",
     "pulse",
     "plan",
-    "letter_write",
-    "letter_lock_update",
-    "letter_read",
+    "feel",
     "I",
 )
 
 EXPECTED_TOOL_PROPERTIES = {
     "breath": set(),
-    "breath_search": {"query", "domain", "max_results", "date_from", "date_to"},
+    "breath_search": {"query", "domain", "max_results", "date_from", "date_to", "quotes"},
     "breath_advanced": {
         "query",
         "max_tokens",
@@ -92,9 +86,12 @@ EXPECTED_TOOL_PROPERTIES = {
         "media",
         "test_data",
         "domain",
+        "source_content",
+        "source_ranges",
+        "quotes",
     },
+    # grow 的 quotes 在 items 的元素里，不是顶层参数——digest 路径不该有引语。
     "grow": {"content", "items", "test_data"},
-    "source_read": {"bucket_id", "expected_title", "scope", "cursor", "max_tokens"},
     "trace": {
         "bucket_id",
         "name",
@@ -130,12 +127,7 @@ EXPECTED_TOOL_PROPERTIES = {
     "release": {"bucket_id"},
     "pulse": {"include_archive"},
     "plan": {"content", "status", "related_bucket", "weight", "why_remembered"},
-    "letter_write": {
-        "author", "content", "user_name", "title", "date", "ai_name",
-        "lock_type", "unlock_date",
-    },
-    "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
-    "letter_read": {"query", "limit", "author", "date_from", "date_to"},
+    "feel": {"query", "max_tokens"},
     "I": {"content", "aspect", "read", "limit", "promote"},
     "dream": {"window_hours"},
 }
@@ -143,13 +135,11 @@ EXPECTED_TOOL_PROPERTIES = {
 EXPECTED_REQUIRED_PROPERTIES = {
     "breath_search": {"query"},
     "hold": {"content"},
-    "source_read": {"bucket_id", "expected_title"},
     "trace": {"bucket_id"},
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},
     "plan": {"content"},
-    "letter_write": {"author", "content"},
-    "letter_lock_update": {"letter_id", "lock_type"},
+    "feel": {"query"},
 }
 
 
@@ -264,6 +254,61 @@ def mcp_client():
     client.close()
 
 
+# 信件自 3.2.0 起挂在第二个连接器上。写信是一个行为，不是一段记忆——
+# 它有收件人、有时间锁，时间方向和记忆相反，所以从主连接器挪了出来。
+MCP_EXTRA_URL = MCP_URL.rstrip("/").removesuffix("/mcp") + "/mcp-extra" if MCP_URL else ""
+
+EXPECTED_EXTRA_TOOLS = {"letter_write", "letter_lock_update", "letter_read"}
+
+EXPECTED_EXTRA_TOOL_PROPERTIES = {
+    "letter_write": {
+        "author", "content", "user_name", "title", "date", "ai_name",
+        "lock_type", "unlock_date",
+    },
+    "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
+    "letter_read": {"query", "limit", "author", "date_from", "date_to"},
+}
+
+EXPECTED_EXTRA_REQUIRED_PROPERTIES = {
+    "letter_write": {"author", "content"},
+    "letter_lock_update": {"letter_id", "lock_type"},
+    "letter_read": set(),
+}
+
+
+@pytest.fixture(scope="module")
+def mcp_extra_client():
+    client = MCPClient(MCP_EXTRA_URL)
+    client.initialize()
+    yield client
+    client.close()
+
+
+def test_extra_connector_exposes_only_letters(mcp_extra_client):
+    """/mcp-extra 只放信件，且契约与主连接器同样严格地被钉住。"""
+    tools = mcp_extra_client.list_tools()
+    names = {tool["name"] for tool in tools}
+    assert names == EXPECTED_EXTRA_TOOLS
+    assert names.isdisjoint(EXPECTED_TOOLS)
+
+    by_name = {tool["name"]: tool for tool in tools}
+    for name, expected_properties in EXPECTED_EXTRA_TOOL_PROPERTIES.items():
+        schema = by_name[name].get("inputSchema", {})
+        assert by_name[name].get("description"), name
+        assert schema.get("type") == "object", name
+        assert set(schema.get("properties", {})) == expected_properties, name
+        assert set(schema.get("required", [])) == EXPECTED_EXTRA_REQUIRED_PROPERTIES[name], name
+
+
+def _client_for(tool: str, mcp_client, mcp_extra_client):
+    """按工具名选连接器。
+
+    信件在 /mcp-extra，其余在 /mcp。边界与安全用例必须对两个端点一视同仁——
+    换了端点不等于换了边界。
+    """
+    return mcp_extra_client if tool in EXPECTED_EXTRA_TOOLS else mcp_client
+
+
 def _marker(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
@@ -332,7 +377,7 @@ def test_concurrent_clients_discover_the_same_stateless_dream_schema():
     assert set(schemas[0]["properties"]) == {"window_hours"}
 
 
-def test_manifest_exposes_exactly_the_documented_15_tools(mcp_client):
+def test_manifest_exposes_exactly_the_documented_main_tools(mcp_client):
     tools = mcp_client.list_tools()
     assert [tool["name"] for tool in tools] == list(EXPECTED_TOOL_ORDER)
     tools_by_name = {tool["name"]: tool for tool in tools}
@@ -351,6 +396,7 @@ def test_manifest_exposes_exactly_the_documented_15_tools(mcp_client):
     assert tools_by_name["breath"]["inputSchema"].get("properties") == {}
 
 
+
 @pytest.mark.parametrize(
     ("tool", "arguments", "field"),
     [
@@ -359,14 +405,11 @@ def test_manifest_exposes_exactly_the_documented_15_tools(mcp_client):
         ("breath_advanced", {"catalog": {"not": "a boolean"}}, "catalog"),
         ("hold", {}, "content"),
         ("grow", {"items": {"not": "a list"}}, "items"),
-        ("source_read", {}, "bucket_id"),
         ("trace", {}, "bucket_id"),
         ("anchor", {}, "bucket_id"),
         ("release", {}, "bucket_id"),
         ("pulse", {"include_archive": {"not": "a boolean"}}, "include_archive"),
         ("plan", {}, "content"),
-        ("letter_write", {"content": "missing author"}, "author"),
-        ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
         ("I", {"read": {"not": "a boolean"}}, "read"),
         ("dream", {"window_hours": {"not": "an integer"}}, "window_hours"),
     ],
@@ -380,6 +423,25 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
 
 
 @pytest.mark.parametrize(
+    ("tool", "arguments", "field"),
+    [
+        ("letter_write", {"content": "missing author"}, "author"),
+        ("letter_read", {"limit": {"not": "an integer"}}, "limit"),
+        ("letter_lock_update", {"letter_id": "x"}, "lock_type"),
+    ],
+)
+def test_extra_tools_reject_schema_invalid_arguments(
+    mcp_extra_client, tool, arguments, field
+):
+    """换了端点不等于换了边界：/mcp-extra 的参数校验必须和主连接器一样严。"""
+    result = mcp_extra_client.call_result(tool, arguments)
+    assert result.get("isError") is True, (tool, result)
+    error_text = mcp_extra_client.result_text(result)
+    assert error_text, (tool, result)
+    assert field.lower() in error_text.lower(), (tool, error_text)
+
+
+@pytest.mark.parametrize(
     ("tool", "arguments"),
     [
         ("breath", {}),
@@ -387,7 +449,6 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
         ("breath_advanced", {}),
         ("hold", {"content": "unknown-field-probe", "test_data": True}),
         ("grow", {"items": []}),
-        ("source_read", {"bucket_id": "unknown", "expected_title": "unknown"}),
         ("trace", {"bucket_id": "missing-unknown-field-probe"}),
         ("anchor", {"bucket_id": "missing-unknown-field-probe"}),
         ("release", {"bucket_id": "missing-unknown-field-probe"}),
@@ -401,9 +462,11 @@ def test_all_tools_reject_schema_invalid_arguments(mcp_client, tool, arguments, 
 )
 def test_all_tools_reject_unknown_arguments_before_execution(
     mcp_client,
+    mcp_extra_client,
     tool,
     arguments,
 ):
+    mcp_client = _client_for(tool, mcp_client, mcp_extra_client)
     arguments = {**arguments, "unknown_contract_probe": True}
     result = mcp_client.call_result(tool, arguments)
 
@@ -594,41 +657,6 @@ def test_grow_long_content_obeys_configured_provider_contract(mcp_client):
     assert marker in recalled
 
 
-def test_grow_items_source_layer_requires_exact_title_and_reads_one_event(mcp_client):
-    marker = _marker("source-layer")
-    source = f"开场 {marker}\n妻子说 wife 喔，不是 girlfriend 喔。\n直接 wife。\n尾声"
-    result = mcp_client.call(
-        "grow",
-        {
-            "content": source,
-            "items": [{
-                "title": "wife",
-                "content": f"{marker} 她注意到我直接用了 wife。",
-                "tags": ["老婆", "称呼"],
-                "importance": 8,
-                "domain": ["恋爱"],
-                "source_ranges": [[2, 3]],
-            }],
-        },
-    )
-    bucket_id = list(re.findall(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", result))[-1]
-
-    denied = mcp_client.call(
-        "source_read",
-        {"bucket_id": bucket_id, "expected_title": "直接确认关系"},
-    )
-    assert "标题不匹配" in denied
-
-    event = mcp_client.call(
-        "source_read",
-        {"bucket_id": bucket_id, "expected_title": "wife", "scope": "event"},
-    )
-    assert "wife 喔" in event
-    assert "直接 wife" in event
-    assert "开场" not in event
-    assert "尾声" not in event
-
-
 def test_trace_updates_existing_memory_metadata(mcp_client):
     marker = _marker("trace")
     bucket_id = _hold(mcp_client, marker)
@@ -742,9 +770,9 @@ def test_plan_invalid_status_falls_back_to_active(mcp_client):
     assert "[active]" in result
 
 
-def test_letter_write_persists_verbatim_letter(mcp_client):
+def test_letter_write_persists_verbatim_letter(mcp_extra_client):
     marker = _marker("letter-write")
-    result = mcp_client.call(
+    result = mcp_extra_client.call(
         "letter_write",
         {"author": "user", "content": marker, "title": "Docker letter"},
     )
@@ -752,24 +780,24 @@ def test_letter_write_persists_verbatim_letter(mcp_client):
     assert "[user]" in result
 
 
-def test_letter_read_returns_matching_letter(mcp_client):
+def test_letter_read_returns_matching_letter(mcp_extra_client):
     marker = _marker("letter-read")
-    mcp_client.call("letter_write", {"author": "user", "content": marker})
-    result = mcp_client.call("letter_read", {"query": marker, "author": "user", "limit": 10})
+    mcp_extra_client.call("letter_write", {"author": "user", "content": marker})
+    result = mcp_extra_client.call("letter_read", {"query": marker, "author": "user", "limit": 10})
     assert marker in result
 
 
-def test_letter_tools_preserve_and_filter_custom_author(mcp_client):
+def test_letter_tools_preserve_and_filter_custom_author(mcp_extra_client):
     marker = _marker("custom-author")
     author = _marker("author")
-    written = mcp_client.call(
+    written = mcp_extra_client.call(
         "letter_write",
         {"author": author, "content": marker, "date": "2026-07-15"},
     )
     bucket_id = _bucket_id(written)
     assert f"[{author}]" in written
 
-    result = mcp_client.call(
+    result = mcp_extra_client.call(
         "letter_read",
         {
             "query": marker,
@@ -785,10 +813,10 @@ def test_letter_tools_preserve_and_filter_custom_author(mcp_client):
     assert author in result
 
 
-def test_letter_time_lock_write_read_and_owner_unlock_in_real_container(mcp_client):
+def test_letter_time_lock_write_read_and_owner_unlock_in_real_container(mcp_extra_client):
     marker = _marker("locked-letter")
     title = _marker("locked-title")
-    written = mcp_client.call(
+    written = mcp_extra_client.call(
         "letter_write",
         {
             "author": "ai",
@@ -801,12 +829,12 @@ def test_letter_time_lock_write_read_and_owner_unlock_in_real_container(mcp_clie
     assert "🔒permanent" in written
     assert marker not in written and title not in written
 
-    owner_read = mcp_client.call(
+    owner_read = mcp_extra_client.call(
         "letter_read", {"query": marker, "limit": 10}
     )
     assert marker in owner_read and title in owner_read
 
-    updated = mcp_client.call(
+    updated = mcp_extra_client.call(
         "letter_lock_update",
         {"letter_id": letter_id, "lock_type": "none"},
     )
@@ -872,7 +900,8 @@ def test_dream_clamps_window_to_documented_bounds(mcp_client, window_hours, expe
         ("letter_read", {"query": "q" * (16 * 1024 + 1)}),
     ],
 )
-def test_query_tools_enforce_query_size_limit(mcp_client, tool, arguments):
+def test_query_tools_enforce_query_size_limit(mcp_client, mcp_extra_client, tool, arguments):
+    mcp_client = _client_for(tool, mcp_client, mcp_extra_client)
     result = mcp_client.call(tool, arguments)
     assert "查询过大" in result
 
@@ -884,13 +913,15 @@ def test_query_tools_enforce_query_size_limit(mcp_client, tool, arguments):
         ("grow", {"content": ""}, "内容为空"),
         ("trace", {"bucket_id": "missing-boundary-id"}, "missing-boundary-id"),
         ("anchor", {"bucket_id": "missing-boundary-id"}, "anchor"),
-        ("release", {"bucket_id": "missing-boundary-id"}, "释放失败"),
+        # 3.0.0：与 anchor 侧对称，改为第一人称并补标点。
+        ("release", {"bucket_id": "missing-boundary-id"}, "我没能把它移开"),
         ("plan", {"content": ""}, "内容为空"),
         ("letter_write", {"author": "", "content": "x"}, "author"),
         ("I", {"content": "x", "aspect": "prompt-injected"}, "aspect 无效"),
     ],
 )
-def test_invalid_tool_arguments_fail_cleanly(mcp_client, tool, arguments, expected):
+def test_invalid_tool_arguments_fail_cleanly(mcp_client, mcp_extra_client, tool, arguments, expected):
+    mcp_client = _client_for(tool, mcp_client, mcp_extra_client)
     result = mcp_client.call(tool, arguments)
     assert expected in result
 
@@ -936,7 +967,8 @@ def test_grow_rejects_excessive_item_count(mcp_client):
     ("letter_write", {"author": "user", "content": "x" * (50 * 1024 + 1)}),
     ("I", {"content": "x" * (50 * 1024 + 1), "aspect": "values"}),
 ])
-def test_single_bucket_tools_enforce_bucket_size_limit(mcp_client, tool, arguments):
+def test_single_bucket_tools_enforce_bucket_size_limit(mcp_client, mcp_extra_client, tool, arguments):
+    mcp_client = _client_for(tool, mcp_client, mcp_extra_client)
     result = mcp_client.call(tool, arguments)
     assert "内容过大" in result
 

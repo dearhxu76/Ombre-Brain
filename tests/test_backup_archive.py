@@ -589,6 +589,27 @@ async def test_keep_both_maps_imported_vector_to_new_id(tmp_path):
     assert await target_engine.get_embedding(imported["id"]) == [0.7, 0.8]
 
 
+def test_keep_both_relation_target_remap_preserves_other_ledger_fields(tmp_path):
+    path = _write_bucket(tmp_path, bucket_id="source")
+    post = frontmatter.load(path)
+    post["relation_links"] = [{
+        "target_bucket_id": "old-target", "type": "causes",
+        "label": "", "status": "detached",
+    }]
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    migrate = object.__new__(MigrateEngine)
+    migrate._atomic_write = lambda target, content: Path(target).write_text(content, encoding="utf-8")
+
+    migrate._remap_imported_relation_targets(
+        {"source": str(path)},
+        {"old-target": "new-target"},
+        frozenset({"source", "old-target"}),
+    )
+
+    remapped = frontmatter.load(path).metadata["relation_links"][0]
+    assert remapped == {"target_bucket_id": "new-target", "type": "causes", "label": "", "status": "detached"}
+
+
 @pytest.mark.asyncio
 async def test_overwrite_preserves_old_memory_under_unique_archived_id(tmp_path):
     source_vault = tmp_path / "source"

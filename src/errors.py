@@ -257,6 +257,20 @@ ERROR_CODES: dict[str, ErrorSpec] = {
             "迁移期间搜索降级为关键词模式，不会丢文件。"
         ),
     ),
+    "OB-W006": ErrorSpec(
+        code="OB-W006",
+        level="W",
+        title_zh="引语超过每桶上限，超出的部分未写入",
+        title_en="quotes exceed per-bucket cap; the overflow was not written",
+        suggestion_zh=(
+            "这条记忆被合并进了一条已有记忆，两边的引语加起来超过了每桶上限"
+            "（默认 3 条）。先记住的那几句被保留，本次多出来的没有写入。\n"
+            "上限是防止「记住几句重要的话」退化成「存原文」——原文层是只写不读的，"
+            "引语不该变成它的替代品。\n"
+            "如果这次多出来的那句确实更重要，可以用 trace(bucket_id, ...) "
+            "看一眼那条桶现在留着哪几句，再决定要不要换。"
+        ),
+    ),
 
     # ---- Info：自动降级 / 轻量提示 ----
     "OB-I002": ErrorSpec(

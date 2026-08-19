@@ -21,6 +21,7 @@ breath_search(query=...) 精准拉取需要的记忆——代替把全部记忆�
 
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket, letter_lock_state
+from ombrebrain.storage.relation_store import relation_hint
 from utils import parse_bool
 from errors import safe_error_detail
 
@@ -99,6 +100,10 @@ async def surface_catalog(
             f"{pin_mark}{anchor_mark}{name} | {','.join(domains) or '未分类'} | {imp} "
             f"| {_footprint(b, meta)}"
         )
+        if not letter_locked:
+            hint = relation_hint(b)
+            if hint:
+                line += f" | {hint.replace(chr(10), ' | ')}"
         btype = meta.get("type")
         key = "letter" if logical_letter else btype if btype in grouped else "dynamic"
         grouped[key].append((imp, line))
